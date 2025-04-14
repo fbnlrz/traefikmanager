@@ -11,7 +11,9 @@ be root / have sudo rights
 Download into directory of your choice
 then:
 chmod +x traefikmanager.sh
-mv traefikmanager.sh /usr/local/bin/traefikmanager
+
+
+sudo mv traefikmanager.sh /usr/local/bin/traefikmanager
 
 
 after that you only have to type "sudo traefikmanager" into your Console to use it.
