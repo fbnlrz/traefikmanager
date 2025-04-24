@@ -6,6 +6,12 @@ This script provides a menu-driven interface to handle installation, configurati
 
 **Based on:** Original German script by fbnlrz, which was based on a guide by phoenyx. This version includes English translation, bug fixes, and implementation of automation features.
 
+
+![Screenshot 2025-04-24 221103](https://github.com/user-attachments/assets/55b75ccd-c39c-40bf-974f-86ba7f976327)
+![Screenshot 2025-04-24 221214](https://github.com/user-attachments/assets/5a7a412f-0804-4bbb-be29-9cae3c6bce0c)
+![Screenshot 2025-04-24 221146](https://github.com/user-attachments/assets/55f3a698-0603-4f27-ad07-3caff7034ef1)
+
+
 ## Features
 
 The script offers a wide range of functionalities organized into menus:
