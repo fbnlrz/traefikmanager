@@ -76,18 +76,18 @@ The script offers a wide range of functionalities organized into menus:
 ## Installation / Setup
 
 1.  **Download the Script:**
-    Save the script content to a file on your server, for example, `traefik-manager.sh`. You can use `curl` or `wget`:
+    Save the script content to a file on your server, for example, `traefikmanager.sh`. You can use `curl` or `wget`:
 
 
-# Example using curl # curl -o traefikmanager.sh https://raw.githubusercontent.com/fbnlrz/traefikmanager/refs/heads/main/traefikmanager.sh
+curl -o traefikmanager.sh https://raw.githubusercontent.com/fbnlrz/traefikmanager/refs/heads/main/traefikmanager.sh
 
 # Or, copy and paste the script content into a file using nano:
-nano traefik-manager.sh
+nano traefikmanager.sh
 # (Paste the script content, then Ctrl+X, then Y, then Enter to save)
 2.  **Make it Executable:**
 
 
-bash chmod +x traefik-manager.sh
+bash chmod +x traefikmanager.sh
 
 ## Usage
 
@@ -96,7 +96,7 @@ bash chmod +x traefik-manager.sh
 Run the script with `sudo` and `bash`:
 
 
-bash sudo bash traefik-manager.sh
+bash sudo bash traefikmanager.sh
 
 You will be presented with the main menu. Enter the number corresponding to the desired category and press Enter. Submenus will guide you through specific actions.
 
@@ -108,9 +108,9 @@ You will be presented with the main menu. Enter the number corresponding to the 
 The script supports a single non-interactive mode specifically for creating backups, intended for use with cron or the script's own systemd-based automation.
 
 
-bash sudo /path/to/traefik-manager.sh --run-backup
+bash sudo /path/to/traefikmanager.sh --run-backup
 
-*   Replace `/path/to/traefik-manager.sh` with the actual path to the script.
+*   Replace `/path/to/traefikmanager.sh` with the actual path to the script.
 *   This command will execute the `backup_traefik` function directly.
 *   Output (success or failure messages) will be printed to standard output/error. If using the script's automation setup (Menu 7 -> 1), this output is appended to `/var/log/traefik_autobackup.log`.
 
@@ -147,4 +147,3 @@ bash sudo /path/to/traefik-manager.sh --run-backup
     *   Check service journal: `sudo journalctl -u traefik-autobackup.service` or `sudo journalctl -u traefik-ip-logger.service`
     *   Check file logs: `/var/log/traefik_autobackup.log` or `/var/log/traefik/ip_access.log`
 
-## License
