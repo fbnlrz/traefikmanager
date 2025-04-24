@@ -79,7 +79,7 @@ The script offers a wide range of functionalities organized into menus:
     Save the script content to a file on your server, for example, `traefik-manager.sh`. You can use `curl` or `wget`:
 
 
-bash # Example using curl (replace URL with the actual raw script URL if hosted) # curl -o traefik-manager.sh RAW_SCRIPT_URL_HERE
+# Example using curl # curl -o traefikmanager.sh https://raw.githubusercontent.com/fbnlrz/traefikmanager/refs/heads/main/traefikmanager.sh
 
 # Or, copy and paste the script content into a file using nano:
 nano traefik-manager.sh
