@@ -1,5 +1,5 @@
 # Traefik Management Script v2.0.0
-
+# WARNING: This is completely generated with AI ( Gemini and DeepSeek) 
 A comprehensive Bash script for managing a Traefik v3 reverse proxy instance on Debian 12 systems.
 
 This script provides a menu-driven interface to handle installation, configuration, service management, logging, backups, automated tasks, diagnostics, and updates for Traefik.
