@@ -1,82 +1,81 @@
 #!/bin/bash
 
 #===============================================================================
-# Traefik Management Skript für Debian 12
+# Traefik Management Script for Debian 12
 #
-# Version:      1.4.0 (unstable, Git entfernt)
-# Author:       fbnlrz
-# Based on:     Anleitung von phoenyx (Vielen Dank!)
-# Date:         2025-04-13
+# Version:      2.0.0 (English Translation, Automation Implemented)
+# Author:       fbnlrz (Fixes/Translation by AI Assistant)
+# Based on:     Guide by phoenyx (Many thanks!)
+# Date:         2025-04-13 (Last Update: 2025-04-24)
 #
-# Beschreibung: Umfassendes Skript zur Verwaltung einer Traefik v3 Instanz.
-#               Installation, Konfiguration, Dienste, Logs, Backup, Autobackup,
-#               IP Logging, Updates, etc. (OHNE Git-Funktionen)
+# Description:  Comprehensive script for managing a Traefik v3 instance.
+#               Installation, configuration, services, logs, backup, autobackup,
+#               IP logging, updates, etc. (WITHOUT Git functions)
 #===============================================================================
 
-# --- Globale Konfigurationsvariablen ---
+# --- Global Configuration Variables ---
 TRAEFIK_SERVICE_FILE="/etc/systemd/system/traefik.service"
 TRAEFIK_BINARY_PATH="/usr/local/bin/traefik"
-TRAEFIK_CONFIG_DIR="/opt/traefik" # Hauptverzeichnis für Backup/Restore
+TRAEFIK_CONFIG_DIR="/opt/traefik" # Main directory for Backup/Restore
 TRAEFIK_LOG_DIR="/var/log/traefik"
 TRAEFIK_SERVICE_NAME="traefik.service"
 TRAEFIK_DYNAMIC_CONF_DIR="${TRAEFIK_CONFIG_DIR}/dynamic_conf"
 TRAEFIK_CERTS_DIR="${TRAEFIK_CONFIG_DIR}/certs"
 TRAEFIK_AUTH_FILE="${TRAEFIK_CONFIG_DIR}/traefik_auth"
-ACME_TLS_FILE="${TRAEFIK_CERTS_DIR}/tls_letsencrypt.json"    # Haupt-ACME-Datei
+ACME_TLS_FILE="${TRAEFIK_CERTS_DIR}/tls_letsencrypt.json"    # Main ACME file
 STATIC_CONFIG_FILE="${TRAEFIK_CONFIG_DIR}/config/traefik.yaml"
 MIDDLEWARES_FILE="${TRAEFIK_DYNAMIC_CONF_DIR}/middlewares.yml"
 BACKUP_BASE_DIR="/var/backups"
 BACKUP_DIR="${BACKUP_BASE_DIR}/traefik"
-IP_LOG_FILE="${TRAEFIK_LOG_DIR}/ip_access.log" # Pfad für IP-Log
-SCRIPT_PATH="$(realpath "$0")" # Pfad zum aktuellen Skript
+IP_LOG_FILE="${TRAEFIK_LOG_DIR}/ip_access.log" # Path for IP log
+SCRIPT_PATH="$(realpath "$0")" # Path to the current script
 
-DEFAULT_TRAEFIK_VERSION="v3.3.5" # Standard-Version hier anpassen, falls gewünscht
-GITHUB_REPO="traefik/traefik" # Für Update Check
+DEFAULT_TRAEFIK_VERSION="v3.3.5" # Adjust default version here if desired
+GITHUB_REPO="traefik/traefik" # For Update Check
 
-# --- Systemd Unit Namen ---
+# --- Systemd Unit Names ---
 AUTOBACKUP_SERVICE="traefik-autobackup.service"
 AUTOBACKUP_TIMER="traefik-autobackup.timer"
-AUTOBACKUP_LOG="/var/log/traefik_autobackup.log"
+AUTOBACKUP_LOG="/var/log/traefik_autobackup.log" # File log for autobackup script output
 IPLOGGER_SERVICE="traefik-ip-logger.service"
 IPLOGGER_HELPER_SCRIPT="/usr/local/sbin/traefik-extract-ips.sh"
 IPLOGGER_LOGROTATE_CONF="/etc/logrotate.d/traefik-ip-logger"
-# AUTOPULL_* Variablen entfernt
+# AUTOPULL_* variables removed
 
-# --- Farben für die Ausgabe (optional) ---
+# --- Colors for Output (optional) ---
 if [ -t 1 ] && command -v tput &> /dev/null; then ncolors=$(tput colors); if [ -n "$ncolors" ] && [ "$ncolors" -ge 8 ]; then RED=$(tput setaf 1); GREEN=$(tput setaf 2); YELLOW=$(tput setaf 3); BLUE=$(tput setaf 4); MAGENTA=$(tput setaf 5); CYAN=$(tput setaf 6); WHITE=$(tput setaf 7); BOLD=$(tput bold); NC=$(tput sgr0); else RED=""; GREEN=""; YELLOW=""; BLUE=""; MAGENTA=""; CYAN=""; WHITE=""; BOLD=""; NC=""; fi; else RED=""; GREEN=""; YELLOW=""; BLUE=""; MAGENTA=""; CYAN=""; WHITE=""; BOLD=""; NC=""; fi
 
 
-# --- Argumenten-Parsing für nicht-interaktiven Modus ---
+# --- Argument Parsing for Non-Interactive Mode ---
 declare -g non_interactive_mode=false
 if [[ "$1" == "--run-backup" ]]; then
     non_interactive_mode=true
-    # Funktion wird später aufgerufen
+    # Function will be called later, after it's defined
 fi
 
-# --- Hilfsfunktionen ---
-check_root() { if [[ $EUID -ne 0 ]]; then echo -e "${RED}FEHLER: Root-Rechte (sudo) benötigt!${NC}"; exit 1; fi; }
-ask_confirmation() { local p=$1; local v=$2; local r; while true; do read -p "${CYAN}${p}${NC} Tippen Sie '${BOLD}ja${NC}' oder '${BOLD}nein${NC}': " r; r=$(echo "$r"|tr '[:upper:]' '[:lower:]'); if [[ "$r" == "ja" ]]; then eval "$v=true"; return 0; elif [[ "$r" == "nein" ]]; then eval "$v=false"; return 0; else echo -e "${YELLOW}Antwort unklar.${NC}"; fi; done; }
+# --- Helper Functions ---
+check_root() { if [[ $EUID -ne 0 ]]; then echo -e "${RED}ERROR: Root privileges (sudo) required!${NC}" >&2; exit 1; fi; }
+ask_confirmation() { local p=$1; local v=$2; local r; while true; do read -p "${CYAN}${p}${NC} Type '${BOLD}yes${NC}' or '${BOLD}no${NC}': " r; r=$(echo "$r"|tr '[:upper:]' '[:lower:]'); if [[ "$r" == "yes" ]]; then eval "$v=true"; return 0; elif [[ "$r" == "no" ]]; then eval "$v=false"; return 0; else echo -e "${YELLOW}Unclear answer.${NC}"; fi; done; }
 is_traefik_installed() { if [[ -f "$TRAEFIK_BINARY_PATH" && -d "$TRAEFIK_CONFIG_DIR" && -f "$STATIC_CONFIG_FILE" ]]; then return 0; else return 1; fi; }
 is_traefik_active() { systemctl is-active --quiet "${TRAEFIK_SERVICE_NAME}"; return $?; }
 
 check_dependencies() {
     local missing_pkgs=(); local pkgs_to_install=()
-    # git entfernt
+    # git removed
     local dependencies=( "jq:jq" "curl:curl" "htpasswd:apache2-utils" "nc:netcat-openbsd" "openssl:openssl" "stat:coreutils" "sed:sed" "grep:grep" "awk:gawk" "tar:tar" "find:findutils" "ss:iproute2" "yamllint:yamllint")
-    echo -e "${BLUE}Prüfe benötigte Zusatztools...${NC}"
+    echo -e "${BLUE}Checking required additional tools...${NC}"
     local jq_needed=false
 
-    if systemctl list-unit-files | grep -q "^${IPLOGGER_SERVICE}"; then jq_needed=true; fi
+    # Check if the IP Logger service unit exists (even if inactive)
+    if systemctl list-unit-files --no-pager 2>/dev/null | grep -q "^${IPLOGGER_SERVICE}"; then jq_needed=true; fi
 
-    for item in "${dependencies[@]}"; do cmd="${item%%:*}"; pkg="${item##*:}";
+    for item in "${dependencies[@]}"; do local cmd="${item%%:*}"; local pkg="${item##*:}";
         if ! command -v "$cmd" &> /dev/null; then
-           is_optional=false
-           is_needed=true # Standardmäßig benötigt
+           local is_needed=true # Needed by default
            if [[ "$cmd" == "yamllint" ]]; then
-               is_optional=true
-               is_needed=false # Nur optional
+               is_needed=false # Only optional
            elif [[ "$cmd" == "jq" ]] && ! $jq_needed; then
-               is_needed=false # Nur benötigt, wenn IP Logger aktiv ist
+               is_needed=false # Only needed if IP Logger is active (or service unit exists)
            fi
 
             if $is_needed && [[ ! " ${pkgs_to_install[@]} " =~ " ${pkg} " ]]; then
@@ -87,49 +86,86 @@ check_dependencies() {
     done
 
     if [ ${#missing_pkgs[@]} -gt 0 ]; then
-        echo -e "${YELLOW}WARNUNG: Folgende Befehle/Pakete fehlen für einige Kernfunktionen:${NC}"; printf "  - %s\n" "${missing_pkgs[@]}"; local install_confirmed=false; ask_confirmation "Sollen die fehlenden Pakete (${pkgs_to_install[*]}) jetzt installiert werden (sudo apt install...)? " install_confirmed
-        if $install_confirmed; then local install_list=$(echo "${pkgs_to_install[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '); echo -e "${BLUE}Installiere: ${install_list}...${NC}"; if ! sudo apt-get update || ! sudo apt-get install -y $install_list; then echo -e "${RED}FEHLER: Konnte Pakete nicht installieren.${NC}"; else echo -e "${GREEN}Zusatzpakete installiert.${NC}"; fi; else echo -e "${YELLOW}INFO: Fehlende Pakete nicht installiert.${NC}"; fi; echo "--------------------------------------------------"; sleep 1
-    else echo -e "${GREEN}Alle benötigten Kern-Zusatztools vorhanden.${NC}"; fi
+        echo -e "${YELLOW}WARNING: The following commands/packages are missing for some core functions:${NC}"; printf "  - %s\n" "${missing_pkgs[@]}"; local install_confirmed=false; ask_confirmation "Install the missing packages (${pkgs_to_install[*]}) now (sudo apt install...)? " install_confirmed
+        if $install_confirmed; then local install_list=$(echo "${pkgs_to_install[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '); echo -e "${BLUE}Installing: ${install_list}...${NC}"; if ! sudo apt-get update || ! sudo apt-get install -y $install_list; then echo -e "${RED}ERROR: Could not install packages.${NC}" >&2; else echo -e "${GREEN}Additional packages installed.${NC}"; fi; else echo -e "${YELLOW}INFO: Missing packages not installed.${NC}"; fi; echo "--------------------------------------------------"; sleep 1
+    else echo -e "${GREEN}All required core additional tools are present.${NC}"; fi
 
     if ! command -v yamllint &> /dev/null; then
-         echo -e "${YELLOW}INFO: Optionales Tool 'yamllint' nicht gefunden (nützlich für Menü 2->4). Installation: sudo apt install yamllint${NC}"
+         echo -e "${YELLOW}INFO: Optional tool 'yamllint' not found (useful for Menu 2->4). Install: sudo apt install yamllint${NC}"
     fi
-    # Prüfe jq separat wenn IP logger aktiv
+    # Check jq separately if IP logger service exists
     if $jq_needed && ! command -v jq &> /dev/null; then
-        echo -e "${RED}FEHLER: 'jq' wird für den aktiven IP-Logger benötigt, ist aber nicht installiert!${NC}" >&2
-        echo -e "${RED}        Bitte installieren: sudo apt install jq ${NC}" >&2
+        echo -e "${RED}ERROR: 'jq' is required for the IP logger (service exists) but is not installed!${NC}" >&2
+        echo -e "${RED}        Please install: sudo apt install jq ${NC}" >&2
+        # return 1 # Optional: Exit script if critical dependency is missing
     fi
 }
 
-# Funktion für Menü-Header
+# Function for Menu Header
 print_header() {
     local title=$1
-    local version="1.4.0 (unstable, no-git)" # Version angepasst
-    clear; echo ""; echo -e "${BLUE}+-----------------------------------------+${NC}"; echo -e "${BLUE}|${NC} ${BOLD}${title}${NC} ${BLUE}|${NC}"; echo -e "${BLUE}|${NC} Version: ${version}  Autor: fbnlrz     ${BLUE}|${NC}"; echo -e "${BLUE}|${NC} Basierend auf Anleitung von: phoenyx    ${BLUE}|${NC}"; echo -e "${BLUE}+-----------------------------------------+${NC}"; echo -e "| Aktuelle Uhrzeit: $(date '+%Y-%m-%d %H:%M:%S %Z') |"; printf "| Traefik Status: %-23s |\n" "${BOLD}$(is_traefik_active && echo "${GREEN}AKTIV   ${NC}" || echo "${RED}INAKTIV${NC}")${NC}"; echo "+-----------------------------------------+";
+    local version="2.0.0 (English, Automation)" # Version updated
+    clear; echo ""; echo -e "${BLUE}+-----------------------------------------+${NC}"; echo -e "${BLUE}|${NC} ${BOLD}${title}${NC} ${BLUE}|${NC}"; echo -e "${BLUE}|${NC} Version: ${version}  Author: fbnlrz    ${BLUE}|${NC}"; echo -e "${BLUE}|${NC} Based on guide by: phoenyx          ${BLUE}|${NC}"; echo -e "${BLUE}+-----------------------------------------+${NC}"; echo -e "| Current Time: $(date '+%Y-%m-%d %H:%M:%S %Z')    |"; printf "| Traefik Status: %-23s |\n" "${BOLD}$(is_traefik_active && echo "${GREEN}ACTIVE  ${NC}" || echo "${RED}INACTIVE${NC}")${NC}"; echo "+-----------------------------------------+";
 }
 
-# --- Hauptfunktionen für Aktionen ---
+# --- Main Action Functions ---
 
 #===============================================================================
-# Funktion: Traefik Installieren oder Überschreiben
+# Function: Install or Overwrite Traefik
 #===============================================================================
 install_traefik() {
-  set -e
+  # Removed set -e to handle errors more explicitly
   print_header "Traefik Installation / Update"
-  echo -e "${BLUE}INFO: Installiert/aktualisiert Traefik.${NC}"; echo "--------------------------------------------------"
-  if is_traefik_installed; then local c=false; ask_confirmation "${YELLOW}WARNUNG: Traefik existiert. Überschreiben?${NC}" c; if ! $c; then echo "Abbruch."; set +e; return 1; fi; echo -e "${YELLOW}INFO: Überschreibe...${NC}"; fi
-  read -p "Traefik-Version [${DEFAULT_TRAEFIK_VERSION}]: " TRAEFIK_VERSION; TRAEFIK_VERSION=${TRAEFIK_VERSION:-$DEFAULT_TRAEFIK_VERSION}; TRAEFIK_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//');
-  read -p "E-Mail für Let's Encrypt: " LETSENCRYPT_EMAIL; while ! [[ "$LETSENCRYPT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; do echo -e "${RED}FEHLER: Ungültige E-Mail.${NC}"; read -p "E-Mail: " LETSENCRYPT_EMAIL; done;
-  read -p "Domain für Dashboard: " TRAEFIK_DOMAIN; while [[ -z "$TRAEFIK_DOMAIN" ]]; do echo -e "${RED}FEHLER: Domain fehlt.${NC}"; read -p "Dashboard Domain: " TRAEFIK_DOMAIN; done;
-  read -p "Dashboard-Benutzername: " BASIC_AUTH_USER; while [[ -z "$BASIC_AUTH_USER" ]]; do echo -e "${RED}FEHLER: Benutzername fehlt.${NC}"; read -p "Login Benutzername: " BASIC_AUTH_USER; done;
-  while true; do read -sp "Passwort für '${BASIC_AUTH_USER}': " BASIC_AUTH_PASSWORD; echo; if [[ -z "$BASIC_AUTH_PASSWORD" ]]; then echo -e "${RED}FEHLER: Passwort leer.${NC}"; continue; fi; read -sp "Passwort bestätigen: " BASIC_AUTH_PASSWORD_CONFIRM; echo; if [[ "$BASIC_AUTH_PASSWORD" == "$BASIC_AUTH_PASSWORD_CONFIRM" ]]; then echo -e "${GREEN}Passwort OK.${NC}"; break; else echo -e "${RED}FEHLER: Passwörter verschieden.${NC}"; fi; done; echo ""
-  echo -e "${BLUE}>>> [1/7] Aktualisiere System & Tools...${NC}"; sudo apt update && sudo apt upgrade -y; check_dependencies; echo -e "${GREEN} Tools OK.${NC}";
-  echo -e "${BLUE}>>> [2/7] Erstelle Verzeichnisse...${NC}"; sudo mkdir -p "${TRAEFIK_CONFIG_DIR}"/{config,dynamic_conf,certs}; sudo mkdir -p "${TRAEFIK_LOG_DIR}"; sudo touch "${ACME_TLS_FILE}"; sudo chmod 600 "${ACME_TLS_FILE}"; echo -e "${GREEN} Verzeichnisse/ACME Datei OK.${NC}";
-  echo -e "${BLUE}>>> [3/7] Lade Traefik ${TRAEFIK_VERSION}...${NC}"; ARCH=$(dpkg --print-architecture); TARGET_ARCH="amd64"; if [[ "$ARCH" != "$TARGET_ARCH" ]]; then local ac=false; ask_confirmation "${YELLOW}WARNUNG: Arch mismatch ('${ARCH}' vs '${TARGET_ARCH}'). Fortfahren?${NC}" ac; if ! $ac; then echo "Abbruch."; set +e; return 1; fi; fi; DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${TRAEFIK_VERSION}/traefik_${TRAEFIK_VERSION}_linux_${TARGET_ARCH}.tar.gz"; TAR_FILE="/tmp/traefik_${TRAEFIK_VERSION}_linux_${TARGET_ARCH}.tar.gz"; echo " Von: ${DOWNLOAD_URL}"; rm -f "$TAR_FILE"; echo -n " Lade... ["; curl -sfL -o "$TAR_FILE" "$DOWNLOAD_URL" & CURL_PID=$!; i=0; spin='-\|/'; while kill -0 $CURL_PID 2> /dev/null; do i=$(( (i+1) %4 )); printf "\b%s" "${spin:$i:1}"; sleep 0.2; done; printf "\b] OK\n"; wait $CURL_PID; CURL_EXIT_CODE=$?; if ! [ $CURL_EXIT_CODE -eq 0 ]; then echo -e "${RED}FEHLER: Download (Code: ${CURL_EXIT_CODE})! URL geprüft?${NC}"; set +e; return 1; fi; echo " Entpacke..."; sudo tar xzvf "$TAR_FILE" -C /tmp/ traefik; echo " Installiere..."; sudo mv -f /tmp/traefik "${TRAEFIK_BINARY_PATH}"; sudo chmod +x "${TRAEFIK_BINARY_PATH}"; echo " Bereinige..."; rm -f "$TAR_FILE"; INSTALLED_VERSION=$("${TRAEFIK_BINARY_PATH}" version | grep -i Version | awk '{print $2}'); echo -e "${GREEN} Traefik ${INSTALLED_VERSION} installiert.${NC}"; # Version angepasst
-  echo -e "${BLUE}>>> [4/7] Erstelle ${STATIC_CONFIG_FILE}...${NC}"; sudo tee "${STATIC_CONFIG_FILE}" > /dev/null <<EOF
+  echo -e "${BLUE}INFO: Installs/updates Traefik.${NC}"; echo "--------------------------------------------------"
+  if is_traefik_installed; then local c=false; ask_confirmation "${YELLOW}WARNING: Traefik exists. Overwrite?${NC}" c; if ! $c; then echo "Aborting."; return 1; fi; echo -e "${YELLOW}INFO: Overwriting...${NC}"; fi
+  read -p "Traefik version [${DEFAULT_TRAEFIK_VERSION}]: " TRAEFIK_VERSION; TRAEFIK_VERSION=${TRAEFIK_VERSION:-$DEFAULT_TRAEFIK_VERSION}; TRAEFIK_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//');
+  read -p "Email for Let's Encrypt: " LETSENCRYPT_EMAIL; while ! [[ "$LETSENCRYPT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; do echo -e "${RED}ERROR: Invalid email.${NC}" >&2; read -p "Email: " LETSENCRYPT_EMAIL; done;
+  read -p "Domain for Dashboard (e.g., traefik.yourdomain.com): " TRAEFIK_DOMAIN; while [[ -z "$TRAEFIK_DOMAIN" ]]; do echo -e "${RED}ERROR: Domain missing.${NC}" >&2; read -p "Dashboard Domain: " TRAEFIK_DOMAIN; done;
+  read -p "Dashboard username: " BASIC_AUTH_USER; while [[ -z "$BASIC_AUTH_USER" ]]; do echo -e "${RED}ERROR: Username missing.${NC}" >&2; read -p "Login username: " BASIC_AUTH_USER; done;
+  while true; do read -sp "Password for '${BASIC_AUTH_USER}': " BASIC_AUTH_PASSWORD; echo; if [[ -z "$BASIC_AUTH_PASSWORD" ]]; then echo -e "${RED}ERROR: Password empty.${NC}" >&2; continue; fi; read -sp "Confirm password: " BASIC_AUTH_PASSWORD_CONFIRM; echo; if [[ "$BASIC_AUTH_PASSWORD" == "$BASIC_AUTH_PASSWORD_CONFIRM" ]]; then echo -e "${GREEN}Password OK.${NC}"; break; else echo -e "${RED}ERROR: Passwords differ.${NC}" >&2; fi; done; echo ""
+
+  echo -e "${BLUE}>>> [1/7] Updating System & Tools...${NC}";
+  if ! sudo apt update; then echo -e "${RED}ERROR: apt update failed.${NC}" >&2; return 1; fi
+  # Removed apt upgrade -y here, check_dependencies handles tool installation
+  check_dependencies;
+  echo -e "${GREEN} Tools OK.${NC}";
+
+  echo -e "${BLUE}>>> [2/7] Creating Directories...${NC}";
+  if ! sudo mkdir -p "${TRAEFIK_CONFIG_DIR}"/{config,dynamic_conf,certs}; then echo -e "${RED}ERROR: Could not create config directories.${NC}" >&2; return 1; fi
+  if ! sudo mkdir -p "${TRAEFIK_LOG_DIR}"; then echo -e "${RED}ERROR: Could not create log directory.${NC}" >&2; return 1; fi
+  if ! sudo touch "${ACME_TLS_FILE}"; then echo -e "${RED}ERROR: Could not create ACME file.${NC}" >&2; return 1; fi
+  if ! sudo chmod 600 "${ACME_TLS_FILE}"; then echo -e "${YELLOW}WARNING: Could not set permissions for ACME file.${NC}" >&2; fi # Warning, not a critical error here
+  echo -e "${GREEN} Directories/ACME file OK.${NC}";
+
+  echo -e "${BLUE}>>> [3/7] Downloading Traefik ${TRAEFIK_VERSION}...${NC}";
+  local ARCH=$(dpkg --print-architecture); local TARGET_ARCH="amd64";
+  if [[ "$ARCH" != "$TARGET_ARCH" ]]; then local ac=false; ask_confirmation "${YELLOW}WARNING: Arch mismatch ('${ARCH}' vs '${TARGET_ARCH}'). Continue?${NC}" ac; if ! $ac; then echo "Aborting."; return 1; fi; fi;
+  local DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${TRAEFIK_VERSION}/traefik_${TRAEFIK_VERSION}_linux_${TARGET_ARCH}.tar.gz";
+  local TAR_FILE="/tmp/traefik_${TRAEFIK_VERSION}_linux_${TARGET_ARCH}.tar.gz";
+  echo " From: ${DOWNLOAD_URL}"; rm -f "$TAR_FILE";
+  echo -n " Downloading... [";
+  curl -sfL -o "$TAR_FILE" "$DOWNLOAD_URL" & CURL_PID=$!;
+  local i=0; local spin='-\|/';
+  while kill -0 $CURL_PID 2> /dev/null; do i=$(( (i+1) %4 )); printf "\b%s" "${spin:$i:1}"; sleep 0.2; done; printf "\b] ";
+  wait $CURL_PID; local CURL_EXIT_CODE=$?;
+  if [ $CURL_EXIT_CODE -ne 0 ]; then echo -e "${RED}ERROR: Download failed (Code: ${CURL_EXIT_CODE})! Check URL? Version ${TRAEFIK_VERSION} exists?${NC}" >&2; return 1; fi; echo "OK";
+
+  echo " Extracting...";
+  if ! sudo tar xzvf "$TAR_FILE" -C /tmp/ traefik; then echo -e "${RED}ERROR: Extraction failed!${NC}" >&2; rm -f "$TAR_FILE"; return 1; fi;
+  echo " Installing...";
+  if ! sudo mv -f /tmp/traefik "${TRAEFIK_BINARY_PATH}"; then echo -e "${RED}ERROR: Could not move binary!${NC}" >&2; rm -f "$TAR_FILE"; return 1; fi;
+  if ! sudo chmod +x "${TRAEFIK_BINARY_PATH}"; then echo -e "${YELLOW}WARNING: Could not set execute permissions for binary.${NC}" >&2; fi # Warning
+  echo " Cleaning up..."; rm -f "$TAR_FILE";
+  local INSTALLED_VERSION=$("${TRAEFIK_BINARY_PATH}" version 2>/dev/null | grep -i Version | awk '{print $2}');
+  if [[ -z "$INSTALLED_VERSION" ]]; then echo -e "${YELLOW}WARNING: Could not determine installed version.${NC}" >&2; INSTALLED_VERSION="unknown"; fi
+  echo -e "${GREEN} Traefik ${INSTALLED_VERSION} installed.${NC}";
+
+  echo -e "${BLUE}>>> [4/7] Creating ${STATIC_CONFIG_FILE}...${NC}";
+  if ! sudo mkdir -p "$(dirname "${STATIC_CONFIG_FILE}")"; then echo -e "${RED}ERROR: Could not create config subdirectory.${NC}" >&2; return 1; fi # Ensure config dir exists
+  if ! sudo tee "${STATIC_CONFIG_FILE}" > /dev/null <<EOF
 #-------------------------------------------------------------------------------
-# Hauptkonfiguration für Traefik ${INSTALLED_VERSION} (Optimiert)
-# Erstellt am: $(date)
+# Main configuration for Traefik ${INSTALLED_VERSION} (Optimized)
+# Created on: $(date)
 #-------------------------------------------------------------------------------
 # --- Global Settings ---
 global:
@@ -139,65 +175,69 @@ global:
 # --- API and Dashboard ---
 api:
   dashboard: true
-  insecure: false # Sicherer Standard: Kein ungesicherter API-Zugriff
+  insecure: false # Secure default: No unsecured API access
 
 # --- Logging ---
 log:
-  level: INFO # Ändern zu DEBUG bei Fehlersuche
+  level: INFO # Change to DEBUG for troubleshooting
   filePath: "${TRAEFIK_LOG_DIR}/traefik.log"
   format: json
 accessLog:
-  filePath: "${TRAEFIK_LOG_DIR}/access.log"
-  format: json # Wichtig für IP Logger
+  filePath: "${TRAEFIK_LOG_DIR}/access.log" # Corrected variable name
+  format: json # Important for IP Logger
   bufferingSize: 100
 
 # --- EntryPoints ---
 entryPoints:
   web:
-    address: "0.0.0.0:80" # Lauscht auf IPv4 Port 80
+    address: "0.0.0.0:80" # Listens on IPv4 Port 80
     http:
       redirections:
         entryPoint:
           to: websecure
           scheme: https
           permanent: true
-    # Vertraue Headern vom Gateway/Router (ersetze IP falls nötig)
+    # Trust headers from the gateway/router (replace IP if necessary)
     forwardedHeaders:
+      # IMPORTANT: Adapt these IPs to your network!
+      # Add the IP(s) of your upstream proxy/router.
       trustedIPs:
         - "127.0.0.1/8"
         - "::1/128"
-        - "192.168.1.1" # Beispiel Router IP - ANPASSEN!
-        # Weitere private Bereiche hinzufügen, falls nötig:
+        - "192.168.1.1" # Example Router IP - PLEASE ADAPT!
+        # Add other private ranges if needed:
         #- "10.0.0.0/8"
         #- "172.16.0.0/12"
         #- "192.168.0.0/16"
 
   websecure:
-    address: "0.0.0.0:443" # Lauscht auf IPv4 Port 443
+    address: "0.0.0.0:443" # Listens on IPv4 Port 443
     http:
       tls:
         certResolver: tls_resolver
-        options: default@file # Referenziert globale 'default' Optionen aus middlewares.yml (oder anderer dyn. config)
+        options: default@file # References global 'default' options from middlewares.yml (or other dyn. config)
     transport:
       respondingTimeouts:
         readTimeout: 60s
         idleTimeout: 180s
         writeTimeout: 60s
-    # Vertraue Headern vom Gateway/Router (ersetze IP falls nötig)
+    # Trust headers from the gateway/router (replace IP if necessary)
     forwardedHeaders:
+      # IMPORTANT: Adapt these IPs to your network!
+      # Add the IP(s) of your upstream proxy/router.
       trustedIPs:
         - "127.0.0.1/8"
         - "::1/128"
-        - "192.168.1.1" # Beispiel Router IP - ANPASSEN!
-        # Weitere private Bereiche hinzufügen, falls nötig:
+        - "192.168.1.1" # Example Router IP - PLEASE ADAPT!
+        # Add other private ranges if needed:
         #- "10.0.0.0/8"
         #- "172.16.0.0/12"
         #- "192.168.0.0/16"
 
 # --- TLS Options ---
-# Definiert in der dynamischen Konfiguration (z.B. middlewares.yml)
-# oder als separate Datei eingebunden via providers.file
-# Hier nur Platzhalter
+# Defined in dynamic configuration (e.g., middlewares.yml)
+# or included as a separate file via providers.file
+# Placeholder only here
 # tls:
 #  options:
 #    default:
@@ -209,62 +249,66 @@ providers:
   file:
     directory: "${TRAEFIK_DYNAMIC_CONF_DIR}"
     watch: true
-  # Optional: Docker Provider (wenn Traefik Docker-Container routen soll)
+  # Optional: Docker Provider (if Traefik should route Docker containers)
   # docker:
   #   exposedByDefault: false
-  #   network: web # Beispiel Docker Netzwerk
+  #   network: web # Example Docker network
 
 # --- Certificate Resolvers ---
 certificatesResolvers:
-  tls_resolver: # Haupt-Resolver
+  tls_resolver: # Main resolver
     acme:
       email: "${LETSENCRYPT_EMAIL}"
-      storage: "${ACME_TLS_FILE}" # Hauptspeicherdatei
-      # Wähle EINE Challenge Methode:
-      # tlsChallenge: {} # Methode 1: TLS-ALPN-01 (Port 443) - Benötigt websecure EntryPoint
-      httpChallenge: # Methode 2: HTTP-01 (Port 80) - Benötigt web EntryPoint
+      storage: "${ACME_TLS_FILE}" # Main storage file
+      # Choose ONE challenge method:
+      # tlsChallenge: {} # Method 1: TLS-ALPN-01 (Port 443) - Requires websecure EntryPoint
+      httpChallenge: # Method 2: HTTP-01 (Port 80) - Requires web EntryPoint
          entryPoint: web
-      # dnsChallenge: # Methode 3: DNS-01 (benötigt Konfiguration pro Anbieter)
-      #   provider: ovh # Beispiel
-      #   # Weitere DNS Provider spezifische Optionen...
+      # dnsChallenge: # Method 3: DNS-01 (requires configuration per provider)
+      #   provider: ovh # Example
+      #   # Other DNS provider specific options...
 
 #-------------------------------------------------------------------------------
-# Ende der Hauptkonfiguration
+# End of main configuration
 #-------------------------------------------------------------------------------
 EOF
-  echo -e "${GREEN} Hauptkonfig OK (forwardedHeaders für 192.168.1.1 hinzugefügt - ggf. anpassen!).${NC}";
-  echo -e "${BLUE}>>> [5/7] Erstelle dyn. Basiskonfigs...${NC}"; echo " - ${MIDDLEWARES_FILE}..."; sudo tee "${MIDDLEWARES_FILE}" > /dev/null <<EOF
+  then echo -e "${GREEN} Main config OK (forwardedHeaders added for 192.168.1.1 - ${YELLOW}PLEASE ADAPT!${NC}).${NC}";
+  else echo -e "${RED}ERROR: Could not create ${STATIC_CONFIG_FILE}.${NC}" >&2; return 1; fi
+
+  echo -e "${BLUE}>>> [5/7] Creating dynamic base configs...${NC}"; echo " - ${MIDDLEWARES_FILE}...";
+  if ! sudo mkdir -p "$(dirname "${MIDDLEWARES_FILE}")"; then echo -e "${RED}ERROR: Could not create dynamic config directory.${NC}" >&2; return 1; fi # Ensure dynamic_conf dir exists
+  if ! sudo tee "${MIDDLEWARES_FILE}" > /dev/null <<EOF
 #-------------------------------------------------------------------------------
-# Middleware Definitionen & Globale TLS Optionen
-# Erstellt am: $(date)
+# Middleware Definitions & Global TLS Options
+# Created on: $(date)
 #-------------------------------------------------------------------------------
 http:
   middlewares:
-    # Basic Auth für Dashboard
+    # Basic Auth for Dashboard
     traefik-auth:
       basicAuth:
         usersFile: "${TRAEFIK_AUTH_FILE}"
 
-    # Allgemeine Sicherheitsheader
+    # General security headers
     default-security-headers:
       headers:
         contentTypeNosniff: true
-        forceSTSHeader: true          # HSTS einschalten
+        forceSTSHeader: true          # Enable HSTS
         stsIncludeSubdomains: true
         stsPreload: true
-        stsSeconds: 31536000          # 1 Jahr HSTS
-        frameDeny: true               # Gegen Clickjacking
-        browserXssFilter: true        # Veraltet, aber schadet nicht
+        stsSeconds: 31536000          # 1 year HSTS
+        frameDeny: true               # Against Clickjacking
+        browserXssFilter: true        # Deprecated, but doesn't hurt
         referrerPolicy: "strict-origin-when-cross-origin"
-        permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=(), usb=()" # Rechte einschränken
+        permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=(), usb=()" # Restrict permissions
 
-    # Verkettete Standard-Middlewares (nur Sicherheit hier)
+    # Chained default middlewares (only security here)
     default-chain:
       chain:
         middlewares:
           - default-security-headers@file
 
-# Globale TLS Optionen (hier definiert, referenziert von entryPoints.websecure.http.tls.options in traefik.yaml)
+# Global TLS Options (defined here, referenced by entryPoints.websecure.http.tls.options in traefik.yaml)
 tls:
   options:
     default:
@@ -285,10 +329,13 @@ tls:
       sniStrict: true
 #-------------------------------------------------------------------------------
 EOF
-  echo " - ${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml..."; sudo tee "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" > /dev/null <<EOF
+  then echo -e "${GREEN} middlewares.yml OK.${NC}"; else echo -e "${RED}ERROR: Could not create ${MIDDLEWARES_FILE}.${NC}" >&2; return 1; fi
+
+  echo " - ${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml...";
+  if ! sudo tee "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" > /dev/null <<EOF
 #-------------------------------------------------------------------------------
-# Dynamische Konfiguration NUR für das Traefik Dashboard
-# Erstellt am: $(date)
+# Dynamic configuration ONLY for the Traefik Dashboard
+# Created on: $(date)
 #-------------------------------------------------------------------------------
 http:
   routers:
@@ -298,22 +345,34 @@ http:
       entryPoints:
         - websecure
       middlewares:
-        - "traefik-auth@file" # Referenziert Middleware aus middlewares.yml
+        - "traefik-auth@file" # References middleware from middlewares.yml
       tls:
         certResolver: tls_resolver
 #-------------------------------------------------------------------------------
 EOF
-  echo -e "${GREEN} Dyn. Konfigs OK.${NC}";
-  echo -e "${BLUE}>>> [6/7] Richte Passwortschutz ein...${NC}"; sudo htpasswd -cb "${TRAEFIK_AUTH_FILE}" "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"; if ! [ $? -eq 0 ]; then echo -e "${RED}FEHLER bei htpasswd!${NC}"; set +e; return 1; fi; sudo chmod 600 "${TRAEFIK_AUTH_FILE}"; echo -e "${GREEN} Passwortschutz OK.${NC}";
-  echo -e "${BLUE}>>> [7/7] Erstelle Systemd Service...${NC}"; sudo tee "${TRAEFIK_SERVICE_FILE}" > /dev/null <<EOF
+  then echo -e "${RED}ERROR: Could not create traefik_dashboard.yml.${NC}" >&2; return 1; fi
+  echo -e "${GREEN} Dynamic configs OK.${NC}";
+
+  echo -e "${BLUE}>>> [6/7] Setting up password protection...${NC}";
+  # Use -c only if file doesn't exist, -b for batch mode
+  local htpasswd_cmd="sudo htpasswd -b";
+  if [[ ! -f "${TRAEFIK_AUTH_FILE}" ]]; then htpasswd_cmd="sudo htpasswd -cb"; echo -e "${BLUE}INFO: Auth file ${TRAEFIK_AUTH_FILE} will be created.${NC}"; fi
+  if ! $htpasswd_cmd "${TRAEFIK_AUTH_FILE}" "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"; then echo -e "${RED}ERROR with htpasswd!${NC}" >&2; return 1; fi;
+  if ! sudo chmod 600 "${TRAEFIK_AUTH_FILE}"; then echo -e "${YELLOW}WARNING: Could not set permissions for password file.${NC}" >&2; fi # Warning
+  echo -e "${GREEN} Password protection OK.${NC}";
+
+  echo -e "${BLUE}>>> [7/7] Creating Systemd Service...${NC}";
+  if ! sudo tee "${TRAEFIK_SERVICE_FILE}" > /dev/null <<EOF
 [Unit]
-Description=Traefik ${INSTALLED_VERSION} - Moderner HTTP Reverse Proxy
+Description=Traefik ${INSTALLED_VERSION} - Modern HTTP Reverse Proxy
 Documentation=https://doc.traefik.io/traefik/
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# Runs as root to bind low ports (80, 443),
+# but with reduced privileges via capabilities.
 User=root
 Group=root
 # Unset capabilities + Ambient capabilities for binding to low ports < 1024
@@ -359,41 +418,54 @@ ReadWritePaths=${TRAEFIK_CONFIG_DIR} ${TRAEFIK_LOG_DIR}
 [Install]
 WantedBy=multi-user.target
 EOF
-  echo -e "${GREEN} Systemd OK (mit Security Enhancements).${NC}";
-  echo -e "${BLUE}>>> Aktiviere & starte Traefik Service...${NC}"; sudo systemctl daemon-reload; sudo systemctl enable "${TRAEFIK_SERVICE_NAME}"; sudo systemctl start "${TRAEFIK_SERVICE_NAME}"; echo " Warte 5s..."; sleep 5; echo " Prüfe Status:"; sudo systemctl status "${TRAEFIK_SERVICE_NAME}" --no-pager -l || echo -e "${YELLOW}WARNUNG: Statusabruf fehlgeschlagen!${NC}";
-  echo "--------------------------------------------------"; echo -e "${GREEN}${BOLD} Installation/Update abgeschlossen! ${NC}"; echo "--------------------------------------------------"; echo " Nächste Schritte:"; echo " 1. DNS: '${TRAEFIK_DOMAIN}' -> $(ip -4 addr show scope global | grep inet | awk '{print $2}' | cut -d / -f 1 || echo 'IP?')"; echo " 2. FIREWALL/PORTS: 80 & 443 TCP offen?"; echo " 3. DASHBOARD: https://${TRAEFIK_DOMAIN} (Login: '${BASIC_AUTH_USER}')"; echo " 4. LOGS: Option 4 im Menü oder 'sudo journalctl -u ${TRAEFIK_SERVICE_NAME} -f'"; echo -e "${YELLOW} 5. WICHTIG: Passen Sie ggf. die 'trustedIPs' in ${STATIC_CONFIG_FILE} an Ihre Router-IP an!${NC}"; echo "--------------------------------------------------"; set +e; return 0
-} # Ende install_traefik
+  then echo -e "${RED}ERROR: Could not create Systemd service file.${NC}" >&2; return 1; fi
+  echo -e "${GREEN} Systemd OK (with Security Enhancements).${NC}";
+
+  echo -e "${BLUE}>>> Enabling & starting Traefik Service...${NC}";
+  if ! sudo systemctl daemon-reload; then echo -e "${RED}ERROR: daemon-reload failed.${NC}" >&2; return 1; fi
+  if ! sudo systemctl enable "${TRAEFIK_SERVICE_NAME}"; then echo -e "${RED}ERROR: enable service failed.${NC}" >&2; return 1; fi
+  if ! sudo systemctl start "${TRAEFIK_SERVICE_NAME}"; then echo -e "${RED}ERROR: start service failed.${NC}" >&2; return 1; fi
+  echo " Waiting 5s..."; sleep 5;
+  echo " Checking status:";
+  if ! sudo systemctl status "${TRAEFIK_SERVICE_NAME}" --no-pager -l; then echo -e "${YELLOW}WARNING: Status check failed or service not active!${NC}" >&2; fi
+
+  echo "--------------------------------------------------"; echo -e "${GREEN}${BOLD} Installation/Update finished! ${NC}"; echo "--------------------------------------------------"; echo " Next steps:"; echo " 1. DNS: '${TRAEFIK_DOMAIN}' -> $(ip -4 addr show scope global | grep inet | awk '{print $2}' | cut -d / -f 1 || echo 'IP?')"; echo " 2. FIREWALL/PORTS: 80 & 443 TCP open?"; echo " 3. DASHBOARD: https://${TRAEFIK_DOMAIN} (Login: '${BASIC_AUTH_USER}')"; echo " 4. LOGS: Option 4 in menu or 'sudo journalctl -u ${TRAEFIK_SERVICE_NAME} -f'"; echo -e "${RED}${BOLD} 5. VERY IMPORTANT: Adapt the 'trustedIPs' in ${STATIC_CONFIG_FILE} to your router/proxy IP(s)!${NC}"; echo "--------------------------------------------------";
+  return 0
+} # End install_traefik
 
 
 #===============================================================================
-# Funktion: Neuen Service / Route hinzufügen (KORRIGIERT für HTTPS Backend)
+# Function: Add New Service / Route (Corrected for HTTPS Backend)
 #===============================================================================
 add_service() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Neuen Service / Route hinzufügen${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    read -p "1. Eindeutiger Name für diesen Service (z.B. 'nextcloud'): " SERVICE_NAME; SERVICE_NAME=$(echo "$SERVICE_NAME" | sed -e 's/[^a-z0-9_-]//g' | tr '[:upper:]' '[:lower:]'); while [[ -z "$SERVICE_NAME" ]]; do read -p "1. Service-Name: " SERVICE_NAME; SERVICE_NAME=$(echo "$SERVICE_NAME" | sed -e 's/[^a-z0-9_-]//g' | tr '[:upper:]' '[:lower:]'); done
-    CONFIG_FILE="${TRAEFIK_DYNAMIC_CONF_DIR}/${SERVICE_NAME}.yml"; echo "     INFO: Konfigurationsdatei: '${CONFIG_FILE}'"
-    if [[ -f "$CONFIG_FILE" ]]; then local ow=false; ask_confirmation "${YELLOW}WARNUNG: Datei existiert bereits. Überschreiben?${NC}" ow; if ! $ow; then echo "Abbruch."; return 1; fi; echo "     INFO: Überschreibe..."; fi
-    read -p "2. Vollständige Domain (z.B. 'cloud.domain.de'): " FULL_DOMAIN; while [[ -z "$FULL_DOMAIN" ]]; do read -p "2. Domain: " FULL_DOMAIN; done
-    read -p "3. Interne IP/Hostname des Ziels: " BACKEND_TARGET; while [[ -z "$BACKEND_TARGET" ]]; do read -p "3. IP/Hostname: " BACKEND_TARGET; done
-    read -p "4. Interner Port des Ziels: " BACKEND_PORT; while ! [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || [[ "$BACKEND_PORT" -lt 1 ]] || [[ "$BACKEND_PORT" -gt 65535 ]]; do read -p "4. Port (1-65535): " BACKEND_PORT; done
-    local backend_uses_https=false; ask_confirmation "5. Verwendet der Ziel-Service selbst HTTPS (https://...)? " backend_uses_https
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Add New Service / Route${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    read -p "1. Unique name for this service (e.g., 'nextcloud'): " SERVICE_NAME; SERVICE_NAME=$(echo "$SERVICE_NAME" | sed -e 's/[^a-z0-9_-]//g' | tr '[:upper:]' '[:lower:]'); while [[ -z "$SERVICE_NAME" ]]; do echo -e "${RED}ERROR: Service name cannot be empty.${NC}" >&2; read -p "1. Service name (can only contain a-z, 0-9, -, _): " SERVICE_NAME; SERVICE_NAME=$(echo "$SERVICE_NAME" | sed -e 's/[^a-z0-9_-]//g' | tr '[:upper:]' '[:lower:]'); done
+    CONFIG_FILE="${TRAEFIK_DYNAMIC_CONF_DIR}/${SERVICE_NAME}.yml"; echo "     INFO: Configuration file: '${CONFIG_FILE}'"
+    if [[ -f "$CONFIG_FILE" ]]; then local ow=false; ask_confirmation "${YELLOW}WARNING: File already exists. Overwrite?${NC}" ow; if ! $ow; then echo "Aborting."; return 1; fi; echo "     INFO: Overwriting..."; fi
+    read -p "2. Full domain (e.g., 'cloud.domain.com'): " FULL_DOMAIN; while [[ -z "$FULL_DOMAIN" ]]; do echo -e "${RED}ERROR: Domain missing.${NC}" >&2; read -p "2. Domain: " FULL_DOMAIN; done
+    read -p "3. Internal IP/Hostname of the target: " BACKEND_TARGET; while [[ -z "$BACKEND_TARGET" ]]; do echo -e "${RED}ERROR: IP/Hostname missing.${NC}" >&2; read -p "3. IP/Hostname: " BACKEND_TARGET; done
+    read -p "4. Internal port of the target: " BACKEND_PORT; while ! [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || [[ "$BACKEND_PORT" -lt 1 ]] || [[ "$BACKEND_PORT" -gt 65535 ]]; do echo -e "${RED}ERROR: Invalid port.${NC}" >&2; read -p "4. Port (1-65535): " BACKEND_PORT; done
+    local backend_uses_https=false; ask_confirmation "5. Does the target service itself use HTTPS (https://...)? " backend_uses_https
     BACKEND_SCHEME="http"; local transport_ref_yaml=""; local transport_def_yaml=""; local transport_name=""; local transport_warning=""
     if $backend_uses_https; then
         BACKEND_SCHEME="https"; local skip_verify=false
-        ask_confirmation "6. SSL-Zertifikat des Backends ignorieren (ja=unsicher, nötig für selbst-signierte Certs)? " skip_verify
-        if $skip_verify; then transport_name="transport-${SERVICE_NAME}"; transport_ref_yaml=$(printf "\n      serversTransport: %s" "${transport_name}"); transport_def_yaml=$(printf "\n\n  serversTransports:\n    %s:\n      insecureSkipVerify: true" "${transport_name}"); transport_warning="# WARNUNG: Backend SSL-Verifizierung deaktiviert!"; echo -e "     ${YELLOW}INFO: Backend-Zertifikatsprüfung wird übersprungen (via ${transport_name}).${NC}"; else echo "     INFO: Backend-Zertifikat wird überprüft (Standard)."; fi
+        ask_confirmation "6. Ignore backend's SSL certificate (yes=insecure, needed for self-signed certs)? " skip_verify
+        if $skip_verify; then transport_name="transport-${SERVICE_NAME}"; transport_ref_yaml=$(printf "\n        serversTransport: %s" "${transport_name}"); transport_def_yaml=$(printf "\n\n  serversTransports:\n    %s:\n      insecureSkipVerify: true" "${transport_name}"); transport_warning="# WARNING: Backend SSL verification disabled!"; echo -e "     ${YELLOW}INFO: Backend certificate check will be skipped (via ${transport_name}).${NC}"; else echo "     INFO: Backend certificate will be verified (default)."; fi
     fi
-    echo -e "${BLUE}Erstelle Konfiguration mit korrekter Formatierung...${NC}";
+    echo -e "${BLUE}Creating configuration with correct formatting...${NC}";
 
-    # KORRIGIERT: `transport_def_yaml` auf der richtigen Ebene einfügen
-    sudo tee "$CONFIG_FILE" > /dev/null <<EOF
+    # CORRECTED: Insert `transport_def_yaml` at the correct level
+    # Ensure directory exists before writing
+    if ! sudo mkdir -p "$(dirname "$CONFIG_FILE")"; then echo -e "${RED}ERROR: Could not create directory for config (${TRAEFIK_DYNAMIC_CONF_DIR}).${NC}" >&2; return 1; fi
+
+    if ! sudo tee "$CONFIG_FILE" > /dev/null <<EOF
 #-------------------------------------------------------------------------------
-# Dynamische Konfiguration für Service: ${SERVICE_NAME}
+# Dynamic configuration for Service: ${SERVICE_NAME}
 # Domain: ${FULL_DOMAIN}
-# Ziel: ${BACKEND_SCHEME}://${BACKEND_TARGET}:${BACKEND_PORT}
+# Target: ${BACKEND_SCHEME}://${BACKEND_TARGET}:${BACKEND_PORT}
 # ${transport_warning}
-# Erstellt am: $(date)
+# Created on: $(date)
 #-------------------------------------------------------------------------------
 http:
   routers:
@@ -402,282 +474,753 @@ http:
       entryPoints:
         - "websecure"
       middlewares:
-        - "default-chain@file" # Verwendet die Standard-Sicherheitskette
+        - "default-chain@file" # Uses the default security chain
       service: "service-${SERVICE_NAME}"
       tls:
-        certResolver: "tls_resolver" # Nutzt den Standard Let's Encrypt Resolver
+        certResolver: "tls_resolver" # Uses the default Let's Encrypt resolver
 
   services:
     service-${SERVICE_NAME}:
       loadBalancer:
         servers:
           - url: "${BACKEND_SCHEME}://${BACKEND_TARGET}:${BACKEND_PORT}"
-        passHostHeader: true ${transport_ref_yaml} # Fügt Referenz nur bei Bedarf ein
+        passHostHeader: true${transport_ref_yaml} # Add reference only if needed
 
-# Server Transport nur definieren, wenn für diesen Service benötigt
-${transport_def_yaml}
+${transport_def_yaml} # Define Server Transport only if needed for this service
 #-------------------------------------------------------------------------------
-# Ende der Konfiguration für ${SERVICE_NAME}
+# End of configuration for ${SERVICE_NAME}
 #-------------------------------------------------------------------------------
 EOF
-    sudo chmod 644 "$CONFIG_FILE"; echo -e "${GREEN}==================================================${NC}"; echo -e "${GREEN} Konfig für '${SERVICE_NAME}' KORRIGIERT erstellt!${NC}"; echo " Datei: ${CONFIG_FILE}"; echo -e "${BLUE} INFO: Traefik sollte die Änderung automatisch erkennen.${NC}";
-    # git_auto_commit entfernt
-    echo "=================================================="; echo -e "${YELLOW} WICHTIG:${NC}"; echo " 1. DNS für '${FULL_DOMAIN}' setzen!"; echo " 2. Backend (${BACKEND_SCHEME}://${BACKEND_TARGET}:${BACKEND_PORT}) Erreichbarkeit prüfen!"; echo " 3. Logs beobachten (Menü)!"; echo "=================================================="; return 0
-} # Ende add_service
+    then echo -e "${RED}ERROR: Could not create configuration file '${CONFIG_FILE}'.${NC}" >&2; return 1; fi
+
+    if ! sudo chmod 644 "$CONFIG_FILE"; then echo -e "${YELLOW}WARNING: Could not set permissions for '${CONFIG_FILE}'.${NC}" >&2; fi # Warning
+    echo -e "${GREEN}==================================================${NC}"; echo -e "${GREEN} Config for '${SERVICE_NAME}' created CORRECTLY!${NC}"; echo " File: ${CONFIG_FILE}"; echo -e "${BLUE} INFO: Traefik should detect the change automatically.${NC}";
+    # git_auto_commit removed
+    echo "=================================================="; echo -e "${YELLOW} IMPORTANT:${NC}"; echo " 1. Set DNS for '${FULL_DOMAIN}'!"; echo " 2. Check backend (${BACKEND_SCHEME}://${BACKEND_TARGET}:${BACKEND_PORT}) reachability!"; echo " 3. Observe logs (menu)!"; echo "=================================================="; return 0
+} # End add_service
 
 
 #===============================================================================
-# Funktion: Service / Route ändern
+# Function: Modify Existing Service / Route
 #===============================================================================
 modify_service() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Bestehenden Service / Route ändern${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    echo "Verfügbare Service-Konfigurationen:"; local files=(); local i=1; local file; local base
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Modify Existing Service / Route${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    echo "Available service configurations:"; local files=(); local i=1; local file; local base
+    # Use find with -print0 and read -d $'\0' for robustness with filenames
     while IFS= read -r -d $'\0' file; do base=$(basename "$file"); if [[ "$base" != "middlewares.yml" && "$base" != "traefik_dashboard.yml" ]]; then files+=("$base"); echo -e "    ${BOLD}${i})${NC} ${base}"; ((i++)); fi; done < <(find "${TRAEFIK_DYNAMIC_CONF_DIR}" -maxdepth 1 -name '*.yml' -type f -print0)
-    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}Keine änderbaren Konfigs gefunden.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Abbrechen"; echo "--------------------------------------------------"; local choice; read -p "Nummer der zu ändernden Datei [0-${#files[@]}]: " choice
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 0 ]] || [[ "$choice" -gt ${#files[@]} ]]; then echo -e "${RED}FEHLER: Ungültige Auswahl.${NC}"; return 1; fi; if [[ "$choice" -eq 0 ]]; then echo "Abbruch."; return 1; fi
-    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${TRAEFIK_DYNAMIC_CONF_DIR}/${fname}"; local editor="${EDITOR:-nano}"; echo "--------------------------------------------------"; echo -e "${BLUE}Öffne '${fname}' mit '${editor}'...${NC}"; echo "-> Ändern Sie Werte (z.B. rule, url). Speichern & Schließen."; echo "--------------------------------------------------"; sleep 2
-    if sudo "$editor" "$fpath"; then
-         echo ""; echo -e "${GREEN}Datei '${fname}' bearbeitet. Traefik sollte Änderungen automatisch erkennen.${NC}";
-         # git_auto_commit entfernt
+    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}No modifiable configs found.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Back"; echo "--------------------------------------------------"; local choice; read -p "Number of the file to modify [0-${#files[@]}]: " choice
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 0 ]] || [[ "$choice" -gt ${#files[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; return 1; fi; if [[ "$choice" -eq 0 ]]; then echo "Aborting."; return 1; fi
+    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${TRAEFIK_DYNAMIC_CONF_DIR}/${fname}"; local editor="${EDITOR:-nano}"; echo "--------------------------------------------------"; echo -e "${BLUE}Opening '${fname}' with '${editor}'...${NC}"; echo "-> Change values (e.g., rule, url). Save & Close."; echo "--------------------------------------------------"; sleep 2
+    # Use sudo -E to preserve EDITOR environment variable
+    if sudo -E "$editor" "$fpath"; then
+         echo ""; echo -e "${GREEN}File '${fname}' edited. Traefik should detect changes automatically.${NC}";
+         # git_auto_commit removed
     else
-         echo ""; echo -e "${YELLOW}WARNUNG: Editor mit Fehler beendet.${NC}"; return 1;
+         echo ""; echo -e "${YELLOW}WARNING: Editor exited with an error or file not saved.${NC}" >&2; return 1;
     fi; return 0
-} # Ende modify_service
+} # End modify_service
 
 
 #===============================================================================
-# Funktion: Traefik Plugin installieren
+# Function: Install Traefik Plugin
 #===============================================================================
 install_plugin() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Traefik Plugin hinzufügen (Experimentell)${NC}"; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${YELLOW}WARNUNG: Experimentelles Feature! Nur Deklaration in ${STATIC_CONFIG_FILE}.${NC}"; echo -e "${YELLOW}         Verwendung muss manuell in dyn. Konfig erfolgen!${NC}"; echo -e "${YELLOW}         Traefik-Neustart erforderlich!${NC}"; echo "--------------------------------------------------"
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    read -p "Modulname des Plugins (z.B. github.com/user/traefik-plugin): " MODULE_NAME; while [[ -z "$MODULE_NAME" ]]; do read -p "Modulname: " MODULE_NAME; done
-    read -p "Version des Plugins (z.B. v1.2.0): " VERSION; while [[ -z "$VERSION" ]]; do read -p "Version: " VERSION; done
-    local PLUGIN_KEY_NAME=$(basename "$MODULE_NAME" | sed -e 's/[^a-zA-Z0-9]//g' | tr '[:upper:]' '[:lower:]'); if [[ -z "$PLUGIN_KEY_NAME" ]]; then PLUGIN_KEY_NAME="plugin${RANDOM}"; fi; echo -e "${BLUE}INFO: Plugin-Schlüssel: '${PLUGIN_KEY_NAME}'.${NC}"
-    local temp_yaml=$(mktemp); sudo cp "${STATIC_CONFIG_FILE}" "${temp_yaml}"; sudo chown "$(whoami):$(whoami)" "${temp_yaml}" # Besitz übernehmen für Bearbeitung
-    # Sicherstellen, dass experimental: und plugins: existieren und korrekt eingerückt sind
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Add Traefik Plugin (Experimental)${NC}"; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${YELLOW}WARNING: Experimental feature! Only declares plugin in ${STATIC_CONFIG_FILE}.${NC}"; echo -e "${YELLOW}         Usage must be configured manually in dynamic config!${NC}"; echo -e "${YELLOW}         Traefik restart required!${NC}"; echo "--------------------------------------------------"
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    read -p "Plugin module name (e.g., github.com/user/traefik-plugin): " MODULE_NAME; while [[ -z "$MODULE_NAME" ]]; do echo -e "${RED}ERROR: Module name missing.${NC}" >&2; read -p "Module name: " MODULE_NAME; done
+    read -p "Plugin version (e.g., v1.2.0): " VERSION; while [[ -z "$VERSION" ]]; do echo -e "${RED}ERROR: Version missing.${NC}" >&2; read -p "Version: " VERSION; done
+    # Generate a key name - sanitize and ensure it's not empty
+    local PLUGIN_KEY_NAME=$(basename "$MODULE_NAME" | sed -e 's/[^a-zA-Z0-9]//g' | tr '[:upper:]' '[:lower:]');
+    if [[ -z "$PLUGIN_KEY_NAME" ]]; then PLUGIN_KEY_NAME="plugin$(head /dev/urandom | tr -dc a-z0-9 | head -c 8)"; fi # Use random string if basename is empty
+    echo -e "${BLUE}INFO: Plugin key: '${PLUGIN_KEY_NAME}'.${NC}"
+
+    local temp_yaml=$(mktemp "/tmp/traefik_static_config_plugin_XXXXXX.yaml")
+    if [[ ! -f "${STATIC_CONFIG_FILE}" ]]; then echo -e "${RED}ERROR: Static config (${STATIC_CONFIG_FILE}) not found.${NC}" >&2; rm -f "$temp_yaml"; return 1; fi
+    if ! sudo cp "${STATIC_CONFIG_FILE}" "${temp_yaml}"; then echo -e "${RED}ERROR: Could not copy static config.${NC}" >&2; rm -f "$temp_yaml"; return 1; fi
+    if ! sudo chown "$(whoami):$(whoami)" "${temp_yaml}"; then echo -e "${YELLOW}WARNING: Could not take ownership of temporary file.${NC}" >&2; fi # Warning
+
+    # Ensure temp file is cleaned up on script exit or interruption
+    trap "sudo rm -f \"${temp_yaml}\" \"${temp_yaml}.new\" 2>/dev/null" EXIT
+
+    # Use awk for more robust insertion after 'plugins:'
+    # Check if 'experimental:' and 'plugins:' exist, create if not
     if ! grep -q -E "^experimental:" "${temp_yaml}"; then
+        echo -e "${BLUE}INFO: Adding 'experimental:' and 'plugins:'...${NC}"
         printf "\nexperimental:\n  plugins:\n" >> "${temp_yaml}"
     elif ! grep -q -E "^\s*plugins:" "${temp_yaml}"; then
-         # Füge 'plugins:' unter 'experimental:' ein, falls es fehlt
-        sudo sed -i '/^experimental:/a \ \ plugins:' "${temp_yaml}"
+        echo -e "${BLUE}INFO: Adding 'plugins:' under 'experimental:'...${NC}"
+        # Insert '  plugins:' after the first 'experimental:' line
+        if ! sudo sed -i '/^experimental:/a \ \ plugins:' "${temp_yaml}"; then
+             echo -e "${RED}ERROR: Could not insert 'plugins:' into temporary file.${NC}" >&2; return 1;
+        fi
     fi
 
-    # Plugin-Block definieren (mit korrekter Einrückung für YAML unter 'plugins:')
-    local plugin_block; printf -v plugin_block "    # Plugin %s hinzugefügt am %s\n    %s:\n      moduleName: \"%s\"\n      version: \"%s\"" "${PLUGIN_KEY_NAME}" "$(date +%Y-%m-%d)" "${PLUGIN_KEY_NAME}" "${MODULE_NAME}" "${VERSION}"
+    # Define plugin block (with correct indentation for YAML under 'plugins:')
+    # Ensure block is correctly indented (usually 4 spaces under 'plugins:')
+    local plugin_block; printf -v plugin_block "    # Plugin %s added on %s\n    %s:\n      moduleName: \"%s\"\n      version: \"%s\"" "${PLUGIN_KEY_NAME}" "$(date +%Y-%m-%d)" "${PLUGIN_KEY_NAME}" "${MODULE_NAME}" "${VERSION}"
 
-    # Füge den Plugin-Block unter der 'plugins:' Zeile ein
-    # Verwende awk für robustere Einfügung nach dem Muster 'plugins:'
-    if sudo awk -v block="$plugin_block" '/^\s*plugins:/ { print; print block; next } 1' "${temp_yaml}" > "${temp_yaml}.new"; then
-        if sudo mv "${temp_yaml}.new" "${STATIC_CONFIG_FILE}"; then
-             echo -e "${GREEN}INFO: Plugin-Deklaration zu ${STATIC_CONFIG_FILE} hinzugefügt.${NC}";
-             # git_auto_commit entfernt
-             sudo rm -f "${temp_yaml}" # Temp-Datei löschen
-        else
-             echo -e "${RED}FEHLER: Konnte ${STATIC_CONFIG_FILE} nicht aktualisieren.${NC}";
-             sudo rm -f "${temp_yaml}" "${temp_yaml}.new"; # Temp-Dateien löschen
-             return 1;
+    echo -e "${BLUE}INFO: Adding plugin declaration...${NC}"
+    # Use awk to insert the block after the first line matching /^\s*plugins:/
+    # This assumes 'plugins:' is at the correct indentation level already.
+    if ! awk -v block="$plugin_block" '/^\s*plugins:/ && !p { print; print block; p=1; next } 1' "${temp_yaml}" > "${temp_yaml}.new"; then
+        echo -e "${RED}ERROR: Could not insert plugin block into temporary file (awk error).${NC}" >&2; return 1
+    fi
+
+    # Validate the modified YAML before replacing the original file (optional but recommended)
+    if command -v yamllint &> /dev/null; then
+        echo -e "${BLUE}INFO: Checking temporary YAML file with 'yamllint'...${NC}"
+        if ! yamllint "${temp_yaml}.new"; then
+             echo -e "${RED}ERROR: YAML syntax error in the prepared configuration!${NC}" >&2
+             echo -e "${RED}        The change will NOT be applied.${NC}" >&2
+             return 1
         fi
+        echo -e "${GREEN}INFO: YAML syntax of prepared configuration seems OK.${NC}"
     else
-        echo -e "${RED}FEHLER: Konnte Plugin-Block nicht einfügen (awk Fehler).${NC}";
-        sudo rm -f "${temp_yaml}" "${temp_yaml}.new"; # Temp-Dateien löschen
+         echo -e "${YELLOW}HINT: 'yamllint' not found, YAML syntax check skipped.${NC}"
+    fi
+
+
+    echo -e "${BLUE}INFO: Replacing static configuration file...${NC}"
+    if ! sudo mv "${temp_yaml}.new" "${STATIC_CONFIG_FILE}"; then
+         echo -e "${RED}ERROR: Could not update ${STATIC_CONFIG_FILE}.${NC}" >&2; return 1;
+    fi
+    # Ensure original file permissions are correct after mv
+    if ! sudo chmod 644 "${STATIC_CONFIG_FILE}"; then echo -e "${YELLOW}WARNING: Could not set permissions for ${STATIC_CONFIG_FILE}.${NC}" >&2; fi
+
+    echo -e "${GREEN}INFO: Plugin declaration added to ${STATIC_CONFIG_FILE}.${NC}";
+    # git_auto_commit removed
+
+    echo "--------------------------------------------------"; echo -e "${YELLOW}IMPORTANT: Plugin added.${NC}"; echo -e "${YELLOW}         >> PLEASE CHECK ${STATIC_CONFIG_FILE} MANUALLY << (indentation!).${NC}"; echo -e "${YELLOW}         Traefik RESTART required!${NC}"; echo "--------------------------------------------------"; local r=false; ask_confirmation "Restart Traefik now?" r; if $r; then manage_service "restart"; else echo "INFO: Traefik not restarted."; fi;
+    return 0
+} # End install_plugin
+
+
+#===============================================================================
+# Function: Remove Service / Route
+#===============================================================================
+remove_service() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Remove Service / Route${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    echo "Available configs to remove:"; local files=(); local i=1; local file; local base
+    # Use find with -print0 and read -d $'\0' for robustness with filenames
+    while IFS= read -r -d $'\0' file; do base=$(basename "$file"); if [[ "$base" != "middlewares.yml" && "$base" != "traefik_dashboard.yml" ]]; then files+=("$base"); echo -e "    ${BOLD}${i})${NC} ${base}"; ((i++)); fi; done < <(find "${TRAEFIK_DYNAMIC_CONF_DIR}" -maxdepth 1 -name '*.yml' -type f -print0)
+    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}No removable configs found.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Back"; echo "--------------------------------------------------"; local choice; read -p "Number [0-${#files[@]}]: " choice
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 0 ]] || [[ "$choice" -gt ${#files[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; return 1; fi; if [[ "$choice" -eq 0 ]]; then echo "Aborting."; return 1; fi
+    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${TRAEFIK_DYNAMIC_CONF_DIR}/${fname}"; echo "--------------------------------------------------"; echo "Deleting: ${fname}"; echo "Path: ${fpath}"; echo "--------------------------------------------------"; local d=false; ask_confirmation "${RED}Are you sure you want to delete '${fname}'?${NC}" d; if ! $d; then echo "Aborting."; return 1; fi; echo "Deleting ${fpath} ...";
+    if sudo rm -f "${fpath}"; then
+        echo -e "${GREEN}File '${fname}' deleted.${NC}";
+        # git_auto_commit removed
+    else
+         echo -e "${RED}ERROR: Deletion failed.${NC}" >&2; return 1;
+    fi; return 0
+} # End remove_service
+
+#===============================================================================
+# Function: Setup/Modify Automatic Backup
+#===============================================================================
+setup_autobackup() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Setup/Modify Automatic Backup${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+
+    local service_file="/etc/systemd/system/${AUTOBACKUP_SERVICE}"
+    local timer_file="/etc/systemd/system/${AUTOBACKUP_TIMER}"
+    local overwrite_confirmed=false
+
+    if [[ -f "$service_file" || -f "$timer_file" ]]; then
+        echo -e "${YELLOW}WARNING: Autobackup service/timer files already exist.${NC}"
+        ask_confirmation "Overwrite existing files and reconfigure?" overwrite_confirmed
+        if ! $overwrite_confirmed; then
+            echo "Aborting."; return 1
+        fi
+        echo -e "${BLUE}INFO: Overwriting existing configuration...${NC}"
+    fi
+
+    # --- Service File Content ---
+    echo -e "${BLUE}Creating Systemd service file (${AUTOBACKUP_SERVICE})...${NC}"
+    if ! sudo tee "$service_file" > /dev/null <<EOF
+[Unit]
+Description=Traefik Automatic Backup Service
+Documentation=file://${SCRIPT_PATH}
+After=network.target
+
+[Service]
+Type=oneshot
+# Executes the main script in non-interactive backup mode
+ExecStart=${SCRIPT_PATH} --run-backup
+User=root
+Group=root
+StandardOutput=append:${AUTOBACKUP_LOG}
+StandardError=append:${AUTOBACKUP_LOG}
+WorkingDirectory=/tmp
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    then
+        echo -e "${RED}ERROR: Could not create service file '${service_file}'.${NC}" >&2
+        return 1
+    fi
+    sudo chmod 644 "$service_file"
+
+    # --- Timer File Content ---
+    echo -e "${BLUE}Creating Systemd timer file (${AUTOBACKUP_TIMER})...${NC}"
+    # TODO: Maybe ask user for frequency? Defaulting to daily.
+    local backup_schedule="daily" # e.g., daily, hourly, weekly, *-*-* 03:00:00
+    local random_delay="1h"
+    echo -e "${CYAN}INFO: Backup will run daily by default (with up to ${random_delay} delay).${NC}"
+    echo -e "${CYAN}      You can adjust the schedule later in '${timer_file}' under '[Timer] OnCalendar='.${NC}"
+
+    if ! sudo tee "$timer_file" > /dev/null <<EOF
+[Unit]
+Description=Traefik Automatic Backup Timer (runs ${AUTOBACKUP_SERVICE})
+Documentation=file://${SCRIPT_PATH}
+# Ensures the timer knows about the service
+Requires=${AUTOBACKUP_SERVICE}
+
+[Timer]
+# Schedule for execution (e.g., daily at a random time between 00:00 and 01:00)
+OnCalendar=${backup_schedule}
+# Runs the backup if the server was offline at the scheduled time
+Persistent=true
+# Spreads the load by delaying the start by a random amount of time
+RandomizedDelaySec=${random_delay}
+Unit=${AUTOBACKUP_SERVICE}
+
+[Install]
+WantedBy=timers.target
+EOF
+    then
+        echo -e "${RED}ERROR: Could not create timer file '${timer_file}'.${NC}" >&2
+        sudo rm -f "$service_file" # Cleanup service file
+        return 1
+    fi
+    sudo chmod 644 "$timer_file"
+
+    # --- Enable and Start Timer ---
+    echo -e "${BLUE}Enabling and starting the timer...${NC}"
+    if ! sudo systemctl daemon-reload; then
+        echo -e "${RED}ERROR: systemctl daemon-reload failed.${NC}" >&2
+        sudo rm -f "$service_file" "$timer_file" # Cleanup
+        return 1
+    fi
+    if ! sudo systemctl enable --now "${AUTOBACKUP_TIMER}"; then
+        echo -e "${RED}ERROR: Could not enable/start timer '${AUTOBACKUP_TIMER}'.${NC}" >&2
+        echo -e "${YELLOW}      Check 'systemctl status ${AUTOBACKUP_TIMER}' and 'journalctl -u ${AUTOBACKUP_TIMER}'.${NC}" >&2
+        sudo rm -f "$service_file" "$timer_file" # Cleanup
         return 1
     fi
 
-    echo "--------------------------------------------------"; echo -e "${YELLOW}WICHTIG: Plugin hinzugefügt.${NC}"; echo -e "${YELLOW}         >> BITTE ${STATIC_CONFIG_FILE} MANUELL PRÜFEN << (Einrückung!).${NC}"; echo -e "${YELLOW}         Traefik NEUSTART nötig!${NC}"; echo "--------------------------------------------------"; local r=false; ask_confirmation "Soll Traefik jetzt neu gestartet werden?" r; if $r; then manage_service "restart"; else echo "INFO: Traefik nicht neu gestartet."; fi; return 0
-} # Ende install_plugin
-
-
-#===============================================================================
-# Funktion: Service / Route entfernen
-#===============================================================================
-remove_service() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Service / Route entfernen${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    echo "Verfügbare Konfigs zum Entfernen:"; local files=(); local i=1; local file; local base
-    while IFS= read -r -d $'\0' file; do base=$(basename "$file"); if [[ "$base" != "middlewares.yml" && "$base" != "traefik_dashboard.yml" ]]; then files+=("$base"); echo -e "    ${BOLD}${i})${NC} ${base}"; ((i++)); fi; done < <(find "${TRAEFIK_DYNAMIC_CONF_DIR}" -maxdepth 1 -name '*.yml' -type f -print0)
-    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}Keine löschbaren Konfigs gefunden.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Abbrechen"; echo "--------------------------------------------------"; local choice; read -p "Nummer [0-${#files[@]}]: " choice
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 0 ]] || [[ "$choice" -gt ${#files[@]} ]]; then echo -e "${RED}FEHLER: Ungültige Auswahl.${NC}"; return 1; fi; if [[ "$choice" -eq 0 ]]; then echo "Abbruch."; return 1; fi
-    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${TRAEFIK_DYNAMIC_CONF_DIR}/${fname}"; echo "--------------------------------------------------"; echo "Lösche: ${fname}"; echo "Pfad: ${fpath}"; echo "--------------------------------------------------"; local d=false; ask_confirmation "${RED}Sicher, dass '${fname}' gelöscht werden soll?${NC}" d; if ! $d; then echo "Abbruch."; return 1; fi; echo "Lösche ${fpath} ...";
-    if sudo rm -f "${fpath}"; then
-        echo -e "${GREEN}Datei '${fname}' gelöscht.${NC}";
-        # git_auto_commit entfernt
-    else
-         echo -e "${RED}FEHLER: Löschen fehlgeschlagen.${NC}"; return 1;
-    fi; return 0
-} # Ende remove_service
-
+    echo "--------------------------------------------------"
+    echo -e "${GREEN}Automatic backup set up successfully!${NC}"
+    echo " Timer status: $(systemctl is-active ${AUTOBACKUP_TIMER})"
+    echo " Next run: $(systemctl list-timers "${AUTOBACKUP_TIMER}" | grep NEXT | awk '{print $4, $5, $6, $7}')"
+    echo " Logs will be written to ${AUTOBACKUP_LOG}."
+    echo "=================================================="
+    return 0
+}
 
 #===============================================================================
-# Funktion: Backup erstellen
-# Argument $1: true für nicht-interaktiven Modus (cron/timer)
+# Function: Remove Automatic Backup
+#===============================================================================
+remove_autobackup() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Remove Automatic Backup${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+
+    local service_file="/etc/systemd/system/${AUTOBACKUP_SERVICE}"
+    local timer_file="/etc/systemd/system/${AUTOBACKUP_TIMER}"
+    local remove_confirmed=false
+
+    if [[ ! -f "$service_file" && ! -f "$timer_file" ]]; then
+        echo -e "${YELLOW}INFO: Autobackup service/timer files not found. Nothing to do.${NC}"
+        return 0
+    fi
+
+    ask_confirmation "${RED}Really stop, disable, and delete the autobackup service and timer?${NC}" remove_confirmed
+    if ! $remove_confirmed; then
+        echo "Aborting."; return 1
+    fi
+
+    echo -e "${BLUE}Stopping and disabling timer...${NC}"
+    sudo systemctl stop "${AUTOBACKUP_TIMER}" 2>/dev/null || true
+    sudo systemctl disable "${AUTOBACKUP_TIMER}" 2>/dev/null || true
+
+    echo -e "${BLUE}Removing Systemd unit files...${NC}"
+    sudo rm -f "$timer_file" "$service_file"
+
+    echo -e "${BLUE}Reloading Systemd...${NC}"
+    sudo systemctl daemon-reload 2>/dev/null || true
+    sudo systemctl reset-failed "${AUTOBACKUP_TIMER}" "${AUTOBACKUP_SERVICE}" 2>/dev/null || true
+
+    echo "--------------------------------------------------"
+    echo -e "${GREEN}Automatic backup removed successfully.${NC}"
+    echo -e "${YELLOW}The log file (${AUTOBACKUP_LOG}) was NOT deleted.${NC}"
+    echo "=================================================="
+    return 0
+}
+
+#===============================================================================
+# Function: Setup Dedicated IP Logging
+#===============================================================================
+setup_ip_logging() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Setup Dedicated IP Logging${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+
+    # Check dependency
+    if ! command -v jq &> /dev/null; then
+        echo -e "${RED}ERROR: 'jq' is required for IP logging.${NC}" >&2
+        check_dependencies # Attempt to install
+        if ! command -v jq &> /dev/null; then
+            echo -e "${RED}ERROR: 'jq' could not be installed. Aborting.${NC}" >&2
+            return 1
+        fi
+    fi
+
+    # --- Check if Traefik access log is JSON (Improved awk) ---
+    local access_log_format
+    access_log_format=$(sudo awk '
+        /^accessLog:/ {in_block=1; next}
+        /^[a-zA-Z#]+:/ && !/^\s*#/ {if (in_block) in_block=0} # Exit block on next top-level key
+        in_block && /^\s*format:\s*([a-zA-Z]+)/ { # Match format line inside block, ignore comments
+            match($0, /^\s*format:\s*([a-zA-Z]+)/, arr);
+            print arr[1]; # Print the captured format
+            found=1;
+            exit; # Found it, stop processing
+        }
+        END {if (!found) print "common"} # Default if not found
+    ' "${STATIC_CONFIG_FILE}" 2>/dev/null)
+
+    if [[ "$access_log_format" != "json" ]]; then
+        echo -e "${RED}ERROR: Traefik Access Log Format is not set to 'json' in ${STATIC_CONFIG_FILE} (or could not be read)!${NC}" >&2
+        echo -e "${RED}        The IP logging script requires JSON logs. Please correct the Traefik configuration.${NC}" >&2
+        echo -e "${RED}        (Found value: '${access_log_format}')" >&2 # Show what was found
+        return 1
+    fi
+    # --- End Check ---
+
+
+    local service_file="/etc/systemd/system/${IPLOGGER_SERVICE}"
+    local timer_file="/etc/systemd/system/${IPLOGGER_SERVICE%.service}.timer" # Derive timer name
+    local overwrite_confirmed=false
+
+    if [[ -f "$service_file" || -f "$timer_file" || -f "$IPLOGGER_HELPER_SCRIPT" || -f "$IPLOGGER_LOGROTATE_CONF" ]]; then
+        echo -e "${YELLOW}WARNING: IP Logger files (Service/Timer/Script/Logrotate) already partially exist.${NC}"
+        ask_confirmation "Overwrite existing files and reconfigure?" overwrite_confirmed
+        if ! $overwrite_confirmed; then
+            echo "Aborting."; return 1
+        fi
+        echo -e "${BLUE}INFO: Overwriting existing configuration...${NC}"
+    fi
+
+    # --- Helper Script Content ---
+    echo -e "${BLUE}Creating helper script (${IPLOGGER_HELPER_SCRIPT})...${NC}"
+    if ! sudo tee "$IPLOGGER_HELPER_SCRIPT" > /dev/null <<EOF
+#!/bin/bash
+# Helper script to extract client IPs from Traefik JSON Access Logs
+
+# Configuration
+ACCESS_LOG="${TRAEFIK_LOG_DIR}/access.log"
+IP_LOG="${IP_LOG_FILE}"
+JQ_COMMAND="/usr/bin/jq" # Use full path for robustness
+
+# Check if jq exists
+if [ ! -x "\${JQ_COMMAND}" ]; then
+    echo "[ERROR] jq command not found or not executable at \${JQ_COMMAND}" >&2
+    exit 1
+fi
+
+# Check if Access Log exists and is readable
+if [ ! -r "\${ACCESS_LOG}" ]; then
+    echo "[INFO] Traefik access log '\${ACCESS_LOG}' not found or not readable. Skipping run." >&2
+    # Exit 0 here, as the service might run before the log is created
+    # or if Traefik is temporarily stopped. Don't want the service to fail constantly.
+    exit 0
+fi
+
+# Ensure the target log directory exists
+mkdir -p "$(dirname "\${IP_LOG}")"
+
+# Extract ClientHost (or ClientAddr as fallback) and redirect to the IP log file
+# Filters only entries that have 'ClientHost' or 'ClientAddr'
+# Adds a timestamp
+# tail -n +1 -f would make this a long-running service, but we use a timer
+# So we process the whole file (or use state tracking - simpler: process whole file)
+# Using jq 'select' to filter and format output
+# Note: Processing the whole file repeatedly can be inefficient for large logs.
+# A more advanced script might track the last processed line number or timestamp.
+# This simple version processes the whole file each time the timer runs.
+echo "[INFO] Processing \${ACCESS_LOG}..."
+if ! \${JQ_COMMAND} -r --arg date_fmt "+%Y-%m-%d %H:%M:%S" \
+    'select(.ClientHost != null or .ClientAddr != null) | now | strftime($date_fmt) + " " + (.ClientHost // .ClientAddr // "N/A")' \
+    "\${ACCESS_LOG}" >> "\${IP_LOG}"; then
+    echo "[ERROR] jq processing failed for \${ACCESS_LOG}" >&2
+    exit 1 # Exit with error if jq fails
+fi
+
+# Optional: Deduplicate the IP log file periodically? Not here, keep it simple.
+
+echo "[INFO] IP extraction finished."
+exit 0
+EOF
+    then
+        echo -e "${RED}ERROR: Could not create helper script '${IPLOGGER_HELPER_SCRIPT}'.${NC}" >&2
+        return 1
+    fi
+    sudo chmod +x "$IPLOGGER_HELPER_SCRIPT"
+
+    # --- Service File Content ---
+    echo -e "${BLUE}Creating Systemd service file (${IPLOGGER_SERVICE})...${NC}"
+    if ! sudo tee "$service_file" > /dev/null <<EOF
+[Unit]
+Description=Traefik IP Address Logger Service (runs helper script)
+Documentation=file://${SCRIPT_PATH}
+After=traefik.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${IPLOGGER_HELPER_SCRIPT}
+User=root # Needs access to /var/log/traefik and potentially /usr/local/sbin
+Group=root
+# Optional: Add sandboxing if desired, but needs careful testing with jq/file access
+# PrivateTmp=true
+# ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    then
+        echo -e "${RED}ERROR: Could not create service file '${service_file}'.${NC}" >&2
+        sudo rm -f "$IPLOGGER_HELPER_SCRIPT" # Cleanup
+        return 1
+    fi
+    sudo chmod 644 "$service_file"
+
+    # --- Timer File Content ---
+    echo -e "${BLUE}Creating Systemd timer file (${timer_file})...${NC}"
+    local log_schedule="*:0/15" # Every 15 minutes
+    local log_random_delay="1m"
+    echo -e "${CYAN}INFO: IP Logging will run every 15 minutes by default.${NC}"
+    echo -e "${CYAN}      You can adjust the schedule later in '${timer_file}'.${NC}"
+
+    if ! sudo tee "$timer_file" > /dev/null <<EOF
+[Unit]
+Description=Traefik IP Address Logger Timer (runs ${IPLOGGER_SERVICE})
+Documentation=file://${SCRIPT_PATH}
+Requires=${IPLOGGER_SERVICE}
+
+[Timer]
+# Schedule for execution (e.g., every 15 minutes)
+OnCalendar=${log_schedule}
+Persistent=true
+RandomizedDelaySec=${log_random_delay}
+Unit=${IPLOGGER_SERVICE}
+
+[Install]
+WantedBy=timers.target
+EOF
+    then
+        echo -e "${RED}ERROR: Could not create timer file '${timer_file}'.${NC}" >&2
+        sudo rm -f "$IPLOGGER_HELPER_SCRIPT" "$service_file" # Cleanup
+        return 1
+    fi
+    sudo chmod 644 "$timer_file"
+
+    # --- Logrotate Configuration ---
+    echo -e "${BLUE}Creating Logrotate configuration (${IPLOGGER_LOGROTATE_CONF})...${NC}"
+    if ! sudo tee "$IPLOGGER_LOGROTATE_CONF" > /dev/null <<EOF
+${IP_LOG_FILE} {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+    su root adm
+}
+EOF
+    then
+        echo -e "${RED}ERROR: Could not create logrotate file '${IPLOGGER_LOGROTATE_CONF}'.${NC}" >&2
+        sudo rm -f "$IPLOGGER_HELPER_SCRIPT" "$service_file" "$timer_file" # Cleanup
+        return 1
+    fi
+    sudo chmod 644 "$IPLOGGER_LOGROTATE_CONF"
+
+    # --- Enable and Start Timer ---
+    echo -e "${BLUE}Enabling and starting the timer...${NC}"
+    if ! sudo systemctl daemon-reload; then
+        echo -e "${RED}ERROR: systemctl daemon-reload failed.${NC}" >&2
+        sudo rm -f "$IPLOGGER_HELPER_SCRIPT" "$service_file" "$timer_file" "$IPLOGGER_LOGROTATE_CONF" # Cleanup
+        return 1
+    fi
+    if ! sudo systemctl enable --now "${timer_file}"; then
+        echo -e "${RED}ERROR: Could not enable/start timer '${timer_file}'.${NC}" >&2
+        echo -e "${YELLOW}      Check 'systemctl status ${timer_file}' and 'journalctl -u ${IPLOGGER_SERVICE}'.${NC}" >&2
+        sudo rm -f "$IPLOGGER_HELPER_SCRIPT" "$service_file" "$timer_file" "$IPLOGGER_LOGROTATE_CONF" # Cleanup
+        return 1
+    fi
+
+    echo "--------------------------------------------------"
+    echo -e "${GREEN}Dedicated IP Logging set up successfully!${NC}"
+    echo " Helper Script: ${IPLOGGER_HELPER_SCRIPT}"
+    echo " Service: ${service_file}"
+    echo " Timer: ${timer_file} (runs every 15 min)"
+    echo " IP Log File: ${IP_LOG_FILE}"
+    echo " Logrotate Config: ${IPLOGGER_LOGROTATE_CONF}"
+    echo " Timer Status: $(systemctl is-active ${timer_file})"
+    echo " Next Run: $(systemctl list-timers "${timer_file}" | grep NEXT | awk '{print $4, $5, $6, $7}')"
+    echo "=================================================="
+    return 0
+}
+
+#===============================================================================
+# Function: Remove Dedicated IP Logging
+#===============================================================================
+remove_ip_logging() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Remove Dedicated IP Logging${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+
+    local service_file="/etc/systemd/system/${IPLOGGER_SERVICE}"
+    local timer_file="/etc/systemd/system/${IPLOGGER_SERVICE%.service}.timer" # Derive timer name
+    local remove_confirmed=false
+
+    if [[ ! -f "$service_file" && ! -f "$timer_file" && ! -f "$IPLOGGER_HELPER_SCRIPT" && ! -f "$IPLOGGER_LOGROTATE_CONF" ]]; then
+        echo -e "${YELLOW}INFO: IP Logger files not found. Nothing to do.${NC}"
+        return 0
+    fi
+
+    ask_confirmation "${RED}Really remove the IP Logger service/timer, helper script, and logrotate config?${NC}" remove_confirmed
+    if ! $remove_confirmed; then
+        echo "Aborting."; return 1
+    fi
+
+    echo -e "${BLUE}Stopping and disabling timer...${NC}"
+    sudo systemctl stop "${timer_file}" 2>/dev/null || true
+    sudo systemctl disable "${timer_file}" 2>/dev/null || true
+
+    echo -e "${BLUE}Removing files...${NC}"
+    sudo rm -f "$timer_file" "$service_file" "$IPLOGGER_HELPER_SCRIPT" "$IPLOGGER_LOGROTATE_CONF"
+
+    echo -e "${BLUE}Reloading Systemd...${NC}"
+    sudo systemctl daemon-reload 2>/dev/null || true
+    sudo systemctl reset-failed "${timer_file}" "${IPLOGGER_SERVICE}" 2>/dev/null || true
+
+    echo "--------------------------------------------------"
+    echo -e "${GREEN}Dedicated IP Logging removed successfully.${NC}"
+    echo -e "${YELLOW}The log file (${IP_LOG_FILE}) was NOT deleted.${NC}"
+    echo "=================================================="
+    return 0
+}
+
+#===============================================================================
+# Function: Create Backup
+# Argument $1: true for non-interactive mode (cron/timer)
 #===============================================================================
 backup_traefik() {
-    local non_interactive=${1:-false} # Standard ist interaktiv
+    local non_interactive=${1:-false} # Default is interactive
 
     if ! $non_interactive; then
-        echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Traefik Konfiguration sichern${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+        echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Backup Traefik Configuration${NC}"; echo -e "${MAGENTA}==================================================${NC}"
     fi
 
     if ! is_traefik_installed; then
-        echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}" >&2 # Fehler auf stderr
+        echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2 # Error to stderr
         return 1
     fi
 
     if ! sudo mkdir -p "${BACKUP_DIR}"; then
-        echo -e "${RED}FEHLER: Konnte Backup-Verzeichnis ${BACKUP_DIR} nicht erstellen.${NC}" >&2
+        echo -e "${RED}ERROR: Could not create backup directory ${BACKUP_DIR}.${NC}" >&2
         return 1
     fi
-    # Versuche Rechte zu setzen, aber mache weiter wenn es fehlschlägt
-    sudo chmod 700 "${BACKUP_DIR}" 2>/dev/null || echo -e "${YELLOW}WARNUNG: Konnte Rechte für ${BACKUP_DIR} nicht auf 700 setzen.${NC}" >&2
+    # Try setting permissions, but continue if it fails
+    sudo chmod 700 "${BACKUP_DIR}" 2>/dev/null || echo -e "${YELLOW}WARNING: Could not set permissions for ${BACKUP_DIR} to 700.${NC}" >&2
 
     local backup_filename="traefik-backup-$(date +%Y%m%d-%H%M%S).tar.gz";
     local full_backup_path="${BACKUP_DIR}/${backup_filename}"
 
     if $non_interactive; then
-        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Erstelle Backup: ${full_backup_path} ..."
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Creating backup: ${full_backup_path} ..."
     else
-        echo "Erstelle Backup: ${full_backup_path} ...";
-        echo " Gesichert wird der Inhalt von: ${TRAEFIK_CONFIG_DIR}";
+        echo "Creating backup: ${full_backup_path} ...";
+        echo " Backing up content of: ${TRAEFIK_CONFIG_DIR}";
         echo "(config/, dynamic_conf/, certs/, traefik_auth etc.)"; echo ""
     fi
 
-    # Sicherung des Inhalts des Verzeichnisses
+    # Backup the contents of the directory
     local tar_output
-    tar_output=$(sudo tar -czvf "${full_backup_path}" -C "${TRAEFIK_CONFIG_DIR}" . 2>&1)
-    local tar_exit_code=$?
+    # Use -C to change directory before archiving contents
+    if tar_output=$(sudo tar -czvf "${full_backup_path}" -C "${TRAEFIK_CONFIG_DIR}" . 2>&1); then
+        local tar_exit_code=0
+    else
+        local tar_exit_code=$?
+    fi
+
 
     if [ $tar_exit_code -eq 0 ]; then
         if $non_interactive; then
-             echo "[$(date +'%Y-%m-%d %H:%M:%S')] Backup erfolgreich erstellt: ${full_backup_path}"
+             echo "[$(date +'%Y-%m-%d %H:%M:%S')] Backup created successfully: ${full_backup_path}"
              # Log tar output only if needed for debugging
              # echo "$tar_output"
         else
-             echo "--------------------------------------------------"; echo -e "${GREEN} Backup erfolgreich: ${full_backup_path}${NC}"; sudo ls -lh "${full_backup_path}"; echo "--------------------------------------------------";
+             echo "--------------------------------------------------"; echo -e "${GREEN} Backup successful: ${full_backup_path}${NC}"; sudo ls -lh "${full_backup_path}"; echo "--------------------------------------------------";
         fi
          return 0
     else
-         echo -e "${RED}FEHLER: Backup fehlgeschlagen! (tar Code: ${tar_exit_code})${NC}" >&2
+         echo -e "${RED}ERROR: Backup failed! (tar Code: ${tar_exit_code})${NC}" >&2
          echo "Tar Output: $tar_output" >&2
          sudo rm -f "${full_backup_path}"; return 1;
     fi
-} # Ende backup_traefik
+} # End backup_traefik
 
 #===============================================================================
-# Funktion: Backup wiederherstellen
+# Function: Restore Backup
 #===============================================================================
 restore_traefik() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Traefik Konfiguration wiederherstellen${NC}"; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${RED}${BOLD}WARNUNG:${NC}${RED} Überschreibt aktuelle Konfiguration in ${TRAEFIK_CONFIG_DIR}!${NC}"; echo "--------------------------------------------------"
-    if [ ! -d "$BACKUP_DIR" ]; then echo -e "${RED}FEHLER: Backup-Verzeichnis ${BACKUP_DIR} nicht gefunden.${NC}"; return 1; fi
-    echo "Verfügbare Backups (neueste zuerst):"; local files=(); local i=1; local file
-    while IFS= read -r file; do files+=("$(basename "$file")"); echo -e "    ${BOLD}${i})${NC} $(basename "$file") ($(stat -c %y "$file" | cut -d'.' -f1))"; ((i++)); done < <(find "${BACKUP_DIR}" -maxdepth 1 -name 'traefik-backup-*.tar.gz' -type f -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-)
-    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}Keine Backups gefunden.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Abbrechen"; echo "--------------------------------------------------"; local choice; read -p "Nummer des Backups [0-${#files[@]}]: " choice
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 0 ]] || [[ "$choice" -gt ${#files[@]} ]]; then echo -e "${RED}FEHLER: Ungültige Auswahl.${NC}"; return 1; fi; if [[ "$choice" -eq 0 ]]; then echo "Abbruch."; return 1; fi
-    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${BACKUP_DIR}/${fname}"; echo "--------------------------------------------------"; echo "Auswahl: ${fname}"; echo "Ziel (wird überschrieben): ${TRAEFIK_CONFIG_DIR}"; echo "--------------------------------------------------"; local restore_confirmed=false; ask_confirmation "${RED}ABSOLUT SICHER? Aktuelle Konfig wird überschrieben!${NC}" restore_confirmed; if ! $restore_confirmed; then echo "Abbruch."; return 1; fi
-    echo -e "${BLUE}INFO: Stoppe Traefik...${NC}"; if is_traefik_active; then manage_service "stop"; sleep 1; if is_traefik_active; then echo -e "${RED}FEHLER: Konnte Traefik nicht stoppen.${NC}"; return 1; fi; else echo "INFO: Lief nicht."; fi
-    echo "Stelle Backup '${fname}' wieder her nach ${TRAEFIK_CONFIG_DIR} ...";
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Restore Traefik Configuration${NC}"; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${RED}${BOLD}WARNING:${NC}${RED} Overwrites current configuration in ${TRAEFIK_CONFIG_DIR}!${NC}"; echo "--------------------------------------------------"
+    if [ ! -d "$BACKUP_DIR" ]; then echo -e "${RED}ERROR: Backup directory ${BACKUP_DIR} not found.${NC}" >&2; return 1; fi
+    echo "Available backups (newest first):"; local files=(); local i=1; local file
+    # Use find with -print0 and read -d $'\0' for robustness with filenames, sort by time
+    # FIX: Corrected syntax error (removed stray fi;) and unnecessary tr command
+    while IFS= read -r -d $'\0' file; do files+=("$(basename "$file")"); echo -e "    ${BOLD}${i})${NC} $(basename "$file") ($(stat -c %y "$file" 2>/dev/null | cut -d'.' -f1))"; ((i++)); done < <(find "${BACKUP_DIR}" -maxdepth 1 -name 'traefik-backup-*.tar.gz' -type f -printf '%T@ %p\0' | sort -znr | cut -z -d' ' -f2-)
+    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}No backups found.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Back"; echo "--------------------------------------------------"; local choice; read -p "Number of the backup [0-${#files[@]}]: " choice
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 0 ]] || [[ "$choice" -gt ${#files[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; return 1; fi; if [[ "$choice" -eq 0 ]]; then echo "Aborting."; return 1; fi
+    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${BACKUP_DIR}/${fname}"; echo "--------------------------------------------------"; echo "Selection: ${fname}"; echo "Target (will be overwritten): ${TRAEFIK_CONFIG_DIR}"; echo "--------------------------------------------------"; local restore_confirmed=false; ask_confirmation "${RED}ABSOLUTELY SURE? Current config will be overwritten!${NC}" restore_confirmed; if ! $restore_confirmed; then echo "Aborting."; return 1; fi
+    echo -e "${BLUE}INFO: Stopping Traefik...${NC}"; if is_traefik_active; then manage_service "stop"; sleep 1; if is_traefik_active; then echo -e "${RED}ERROR: Could not stop Traefik.${NC}" >&2; return 1; fi; else echo "INFO: Was not running."; fi
+    echo "Restoring backup '${fname}' to ${TRAEFIK_CONFIG_DIR} ...";
 
-    # Sicherstellen, dass das Zielverzeichnis existiert, bevor hinein extrahiert wird
+    # Ensure the target directory exists before extracting into it
     if ! sudo mkdir -p "${TRAEFIK_CONFIG_DIR}"; then
-        echo -e "${RED}FEHLER: Konnte Zielverzeichnis ${TRAEFIK_CONFIG_DIR} nicht erstellen.${NC}";
+        echo -e "${RED}ERROR: Could not create target directory ${TRAEFIK_CONFIG_DIR}.${NC}" >&2;
         return 1
     fi
 
-    # Entpacke direkt in das Zielverzeichnis mit --overwrite
+    # Extract directly into the target directory with --overwrite
     if sudo tar -xzvf "${fpath}" -C "${TRAEFIK_CONFIG_DIR}" --overwrite; then
         local tar_exit_code=$?
         if [ $tar_exit_code -eq 0 ]; then
-             echo -e "${GREEN}Backup erfolgreich wiederhergestellt.${NC}"; echo "Setze Rechte...";
-             # Setze Rechte für bekannte sensible Dateien NACH dem Entpacken
+             echo -e "${GREEN}Backup restored successfully.${NC}"; echo "Setting permissions...";
+             # Set permissions for known sensitive files AFTER extracting
              if [[ -f "${ACME_TLS_FILE}" ]]; then
-                 sudo chmod 600 "${ACME_TLS_FILE}" 2>/dev/null || echo -e "${YELLOW}WARNUNG: Rechte für ACME TLS Datei (${ACME_TLS_FILE}) konnten nicht gesetzt werden.${NC}";
+                 sudo chmod 600 "${ACME_TLS_FILE}" 2>/dev/null || echo -e "${YELLOW}WARNING: Could not set permissions for ACME TLS file (${ACME_TLS_FILE}).${NC}" >&2;
              fi
              if [[ -f "${TRAEFIK_AUTH_FILE}" ]]; then
-                 sudo chmod 600 "${TRAEFIK_AUTH_FILE}" 2>/dev/null || echo -e "${YELLOW}WARNUNG: Rechte für Auth-Datei (${TRAEFIK_AUTH_FILE}) konnten nicht gesetzt werden.${NC}";
+                 sudo chmod 600 "${TRAEFIK_AUTH_FILE}" 2>/dev/null || echo -e "${YELLOW}WARNING: Could not set permissions for auth file (${TRAEFIK_AUTH_FILE}).${NC}" >&2;
              fi
-             # git_auto_commit entfernt
+             # git_auto_commit removed
 
-             echo "--------------------------------------------------"; echo -e "${GREEN}INFO: Wiederherstellung fertig.${NC}"; local start_confirmed=false; ask_confirmation "Soll Traefik jetzt gestartet werden?" start_confirmed; if $start_confirmed; then manage_service "start"; else echo "INFO: Traefik nicht gestartet."; fi;
+             echo "--------------------------------------------------"; echo -e "${GREEN}INFO: Restore finished.${NC}"; local start_confirmed=false; ask_confirmation "Start Traefik now?" start_confirmed; if $start_confirmed; then manage_service "start"; else echo "INFO: Traefik not started."; fi;
              return 0
         else
-             echo -e "${RED}FEHLER: Wiederherstellung fehlgeschlagen! (tar Code: ${tar_exit_code})${NC}"; echo -e "${RED} Zustand von ${TRAEFIK_CONFIG_DIR} ist evtl. inkonsistent!${NC}"; return 1;
+             echo -e "${RED}ERROR: Restore failed! (tar Code: ${tar_exit_code})${NC}" >&2; echo -e "${RED} State of ${TRAEFIK_CONFIG_DIR} might be inconsistent!${NC}" >&2; return 1;
         fi
     else
         local tar_exit_code=$?
-        echo -e "${RED}FEHLER: Wiederherstellung fehlgeschlagen! (tar konnte nicht ausgeführt werden, Code: ${tar_exit_code})${NC}"; echo -e "${RED}         Zustand von ${TRAEFIK_CONFIG_DIR} ist evtl. inkonsistent!${NC}"; return 1;
+        echo -e "${RED}ERROR: Restore failed! (tar could not be executed, Code: ${tar_exit_code})${NC}" >&2; echo -e "${RED}         State of ${TRAEFIK_CONFIG_DIR} might be inconsistent!${NC}" >&2; return 1;
     fi
-} # Ende restore_traefik
+} # End restore_traefik
 
 
 #===============================================================================
-# Funktion: Traefik Dienstverwaltung
+# Function: Manage Traefik Service
 #===============================================================================
 manage_service() {
-    local action=$1; echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Traefik Service: Aktion '${action}' wird versucht...${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi; if ! [[ -f "${TRAEFIK_SERVICE_FILE}" ]]; then echo -e "${RED}FEHLER: Service Datei nicht gefunden.${NC}"; return 1; fi
-    case $action in start) if is_traefik_active; then echo -e "${YELLOW}INFO: Läuft schon.${NC}"; else sudo systemctl start "${TRAEFIK_SERVICE_NAME}"; sleep 1; if is_traefik_active; then echo -e "${GREEN}Gestartet.${NC}"; else echo -e "${RED}FEHLER: Start fehlgeschlagen!${NC}"; fi; fi ;; stop) if ! is_traefik_active; then echo -e "${YELLOW}INFO: Lief nicht.${NC}"; else sudo systemctl stop "${TRAEFIK_SERVICE_NAME}"; sleep 1; if ! is_traefik_active; then echo -e "${GREEN}Gestoppt.${NC}"; else echo -e "${RED}FEHLER: Stopp fehlgeschlagen!${NC}"; fi; fi ;; restart) echo "Starte neu..."; sudo systemctl restart "${TRAEFIK_SERVICE_NAME}"; sleep 2; if is_traefik_active; then echo -e "${GREEN}Neustart erfolgreich.${NC}"; else echo -e "${RED}FEHLER: Lief nach Neustart nicht!${NC}"; fi ;; status) echo "Status:"; sudo systemctl status "${TRAEFIK_SERVICE_NAME}" --no-pager -l ;; *) echo -e "${RED}FEHLER: Aktion '$action' unbekannt.${NC}"; return 1 ;; esac; echo "=================================================="; return 0
-} # Ende manage_service
+    local action=$1; echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Traefik Service: Action '${action}' attempting...${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi; if ! [[ -f "${TRAEFIK_SERVICE_FILE}" ]]; then echo -e "${RED}ERROR: Service file not found (${TRAEFIK_SERVICE_FILE}).${NC}" >&2; return 1; fi
+    case "$action" in # Quote action
+        start)
+            if is_traefik_active; then echo -e "${YELLOW}INFO: Already running.${NC}"; else
+                if sudo systemctl start "${TRAEFIK_SERVICE_NAME}"; then
+                    sleep 1;
+                    if is_traefik_active; then echo -e "${GREEN}Started.${NC}"; else echo -e "${RED}ERROR: Start failed!${NC}" >&2; return 1; fi
+                else
+                    echo -e "${RED}ERROR: systemctl start failed!${NC}" >&2; return 1;
+                fi
+            fi
+            ;;
+        stop)
+            if ! is_traefik_active; then echo -e "${YELLOW}INFO: Was not running.${NC}"; else
+                if sudo systemctl stop "${TRAEFIK_SERVICE_NAME}"; then
+                    sleep 1;
+                    if ! is_traefik_active; then echo -e "${GREEN}Stopped.${NC}"; else echo -e "${RED}ERROR: Stop failed!${NC}" >&2; return 1; fi
+                else
+                    echo -e "${RED}ERROR: systemctl stop failed!${NC}" >&2; return 1;
+                fi
+            fi
+            ;;
+        restart)
+            echo "Restarting...";
+            if sudo systemctl restart "${TRAEFIK_SERVICE_NAME}"; then
+                sleep 2;
+                if is_traefik_active; then echo -e "${GREEN}Restart successful.${NC}"; else echo -e "${RED}ERROR: Was not running after restart!${NC}" >&2; return 1; fi
+            else
+                echo -e "${RED}ERROR: systemctl restart failed!${NC}" >&2; return 1;
+            fi
+            ;;
+        status)
+            echo "Status:";
+            if ! sudo systemctl status "${TRAEFIK_SERVICE_NAME}" --no-pager -l; then echo -e "${YELLOW}WARNING: Status check failed!${NC}" >&2; return 1; fi # Return 1 if status fails
+            ;;
+        *) echo -e "${RED}ERROR: Action '$action' unknown.${NC}" >&2; return 1 ;;
+    esac; echo "=================================================="; return 0
+} # End manage_service
 
 
 #===============================================================================
-# Funktion: Logs anzeigen
+# Function: View Logs
 #===============================================================================
 view_logs() {
-    local log_type=$1; echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Zeige Logs: ${log_type}${NC}"; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${CYAN}INFO: Mit Strg+C beenden.${NC}"; echo "--------------------------------------------------"; sleep 1
-    local f="" # Variable für Dateipfade
-    case $log_type in
-       traefik) f="${TRAEFIK_LOG_DIR}/traefik.log"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}FEHLER: Log (${f}) nicht gefunden.${NC}"; return 1; fi ;;
-       access) f="${TRAEFIK_LOG_DIR}/access.log"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}FEHLER: Log (${f}) nicht gefunden.${NC}"; return 1; fi ;;
-       ip_access) f="${IP_LOG_FILE}"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}FEHLER: Log (${f}) nicht gefunden (IP Logging evtl. nicht aktiv?).${NC}"; return 1; fi ;;
-       journal) sudo journalctl -u "${TRAEFIK_SERVICE_NAME}" -n 100 -f ;;
-       autobackup) sudo journalctl -u "${AUTOBACKUP_SERVICE}" -n 100 -f ;;
-       ip_logger) sudo journalctl -u "${IPLOGGER_SERVICE}" -n 100 -f ;;
-       autobackup_file) f="${AUTOBACKUP_LOG}"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}FEHLER: Log (${f}) nicht gefunden.${NC}"; return 1; fi ;;
-       # autopull_file entfernt
-       *) echo -e "${RED}FEHLER: Log-Typ '$log_type' unbekannt.${NC}"; return 1 ;; esac;
-    echo "--------------------------------------------------"; echo -e "${CYAN}Log-Anzeige beendet.${NC}"; return 0
-} # Ende view_logs
+    local log_type=$1; echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Show Logs: ${log_type}${NC}"; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${CYAN}INFO: Press Ctrl+C to exit.${NC}"; echo "--------------------------------------------------"; sleep 1
+    local f="" # Variable for file paths
+    case "$log_type" in # Quote log_type
+       traefik) f="${TRAEFIK_LOG_DIR}/traefik.log"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}ERROR: Log (${f}) not found.${NC}" >&2; return 1; fi ;;
+       access) f="${TRAEFIK_LOG_DIR}/access.log"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}ERROR: Log (${f}) not found.${NC}" >&2; return 1; fi ;;
+       ip_access) f="${IP_LOG_FILE}"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}ERROR: Log (${f}) not found (IP Logging maybe not active?).${NC}" >&2; return 1; fi ;;
+       journal) sudo journalctl -u "${TRAEFIK_SERVICE_NAME}" -n 100 -f || { echo -e "${RED}ERROR: journalctl failed.${NC}" >&2; return 1; } ;;
+       autobackup) sudo journalctl -u "${AUTOBACKUP_SERVICE}" -n 100 -f || { echo -e "${RED}ERROR: journalctl failed.${NC}" >&2; return 1; } ;;
+       ip_logger) sudo journalctl -u "${IPLOGGER_SERVICE}" -n 100 -f || { echo -e "${RED}ERROR: journalctl failed.${NC}" >&2; return 1; } ;;
+       autobackup_file) f="${AUTOBACKUP_LOG}"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}ERROR: Log (${f}) not found (Autobackup maybe not active?).${NC}" >&2; return 1; fi ;;
+       # autopull_file removed
+       *) echo -e "${RED}ERROR: Log type '$log_type' unknown.${NC}" >&2; return 1 ;; esac;
+    echo "--------------------------------------------------"; echo -e "${CYAN}Log view finished.${NC}"; return 0
+} # End view_logs
 
 
 #===============================================================================
-# Funktion: Traefik Deinstallieren
+# Function: Uninstall Traefik
 #===============================================================================
 uninstall_traefik() {
-    echo ""; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo -e "${RED}!! ACHTUNG: DEINSTALLATION! ALLES WEG! KEIN ZURÜCK!                      !!${NC}"; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo "Bist du sicher? Die ganze Arbeit..."; echo " - Service? Weg."; echo " - Programm? Weg."; echo " - Konfigs (${TRAEFIK_CONFIG_DIR})? Alles weg."; echo " - Logs (${TRAEFIK_LOG_DIR})? Auch weg."; echo ""; echo "Apt-Pakete bleiben aber."; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo ""
-    if ! is_traefik_installed; then echo "INFO: Traefik scheint nicht (vollständig) installiert zu sein."; local c=false; ask_confirmation "Trotzdem versuchen, bekannte Reste aufzuräumen?" c; if ! $c; then echo "Abbruch."; return 1; fi; else local d=false; ask_confirmation "${RED}Letzte Chance: Wirklich ALLES von Traefik LÖSCHEN?${NC}" d; if ! $d; then echo "Abbruch."; return 1; fi; fi; echo ""; echo ">>> Beginne Deinstallation...";
-    # Automatisierungs-Units entfernen (Auto-Pull entfernt)
-    echo "[0/8] Stoppe & entferne Automatisierung..."; # Nummerierung angepasst
-    remove_autobackup # Versuche zu entfernen
-    remove_ip_logging   # Versuche zu entfernen
-    # remove_autopull entfernt
-    echo "[1/8] Stoppe Service..."; if systemctl is-active --quiet "${TRAEFIK_SERVICE_NAME}"; then sudo systemctl stop "${TRAEFIK_SERVICE_NAME}"; echo " Gestoppt."; else echo " Lief nicht oder Service unbekannt."; fi;
-    echo "[2/8] Deaktiviere Autostart..."; if systemctl is-enabled --quiet "${TRAEFIK_SERVICE_NAME}"; then sudo systemctl disable "${TRAEFIK_SERVICE_NAME}"; echo " Deaktiviert."; else echo " War nicht aktiviert oder Service unbekannt."; fi;
-    echo "[3/8] Entferne Service Datei..."; if [[ -f "${TRAEFIK_SERVICE_FILE}" ]]; then sudo rm -f "${TRAEFIK_SERVICE_FILE}"; echo " Gelöscht: ${TRAEFIK_SERVICE_FILE}"; else echo " Nicht gefunden: ${TRAEFIK_SERVICE_FILE}"; fi;
-    echo "[4/8] Lade Systemd neu..."; sudo systemctl daemon-reload; sudo systemctl reset-failed "${TRAEFIK_SERVICE_NAME}" &> /dev/null || true; echo " Neu geladen.";
-    echo "[5/8] Entferne Programm..."; if [[ -f "${TRAEFIK_BINARY_PATH}" ]]; then sudo rm -f "${TRAEFIK_BINARY_PATH}"; echo " Gelöscht: ${TRAEFIK_BINARY_PATH}"; else echo " Nicht gefunden: ${TRAEFIK_BINARY_PATH}"; fi;
-    echo "[6/8] Entferne Konfigs..."; if [[ -d "${TRAEFIK_CONFIG_DIR}" ]]; then sudo rm -rf "${TRAEFIK_CONFIG_DIR}"; echo " Gelöscht: ${TRAEFIK_CONFIG_DIR}"; else echo " Nicht gefunden: ${TRAEFIK_CONFIG_DIR}"; fi;
-    echo "[7/8] Entferne Logs..."; if [[ -d "${TRAEFIK_LOG_DIR}" ]]; then sudo rm -rf "${TRAEFIK_LOG_DIR}"; echo " Gelöscht: ${TRAEFIK_LOG_DIR} (inkl. ip_access.log etc.)"; else echo " Nicht gefunden: ${TRAEFIK_LOG_DIR}"; fi;
-    echo "[8/8] Entferne Helper Skripte & Logrotate Konfigs..."; # Zusammengefasst
-     if [[ -f "${IPLOGGER_HELPER_SCRIPT}" ]]; then sudo rm -f "${IPLOGGER_HELPER_SCRIPT}"; echo " Gelöscht: ${IPLOGGER_HELPER_SCRIPT}"; else echo " Nicht gefunden: ${IPLOGGER_HELPER_SCRIPT}"; fi;
-     # AUTOPULL_HELPER_SCRIPT entfernt
-     if [[ -f "${IPLOGGER_LOGROTATE_CONF}" ]]; then sudo rm -f "${IPLOGGER_LOGROTATE_CONF}"; echo " Gelöscht: ${IPLOGGER_LOGROTATE_CONF}"; else echo " Nicht gefunden: ${IPLOGGER_LOGROTATE_CONF}"; fi;
-    echo ""; echo -e "${GREEN}===========================================${NC}"; echo -e "${GREEN} Deinstallation (oder Aufräumversuch) abgeschlossen.${NC}"; echo -e "${YELLOW} Hoffentlich war das richtig so.${NC}"; echo -e "${GREEN}===========================================${NC}"; echo " Denk ggf. an 'sudo apt purge apache2-utils jq curl ... && sudo apt autoremove'"; echo "==========================================="; return 0
-} # Ende uninstall_traefik
+    echo ""; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo -e "${RED}!! ATTENTION: UNINSTALLATION! EVERYTHING WILL BE GONE! NO GOING BACK!      !!${NC}"; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo "Are you sure? All that work..."; echo " - Service? Gone."; echo " - Binary? Gone."; echo " - Configs (${TRAEFIK_CONFIG_DIR})? All gone."; echo " - Logs (${TRAEFIK_LOG_DIR})? Gone too."; echo ""; echo "Apt packages will remain though."; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo ""
+    if ! is_traefik_installed; then echo "INFO: Traefik does not seem to be (fully) installed."; local c=false; ask_confirmation "Attempt to clean up known remnants anyway?" c; if ! $c; then echo "Aborting."; return 1; fi; else local d=false; ask_confirmation "${RED}Last chance: Really DELETE EVERYTHING related to Traefik?${NC}" d; if ! $d; then echo "Aborting."; return 1; fi; fi; echo ""; echo ">>> Starting uninstallation...";
+    # Remove automation units - Call implemented functions
+    echo "[0/8] Stopping & removing automation..."; # Numbering adjusted
+    remove_autobackup || echo -e "${YELLOW}WARNING: Error removing autobackup units.${NC}" >&2
+    remove_ip_logging || echo -e "${YELLOW}WARNING: Error removing IP logging units/scripts.${NC}" >&2
+    # remove_autopull removed
 
-# --- NEUE FUNKTIONEN ---
+    echo "[1/8] Stopping service..."; if systemctl is-active --quiet "${TRAEFIK_SERVICE_NAME}"; then sudo systemctl stop "${TRAEFIK_SERVICE_NAME}" && echo " Stopped." || echo -e "${RED}ERROR: Could not stop service.${NC}" >&2; else echo " Was not running or service unknown."; fi;
+    echo "[2/8] Disabling autostart..."; if systemctl is-enabled --quiet "${TRAEFIK_SERVICE_NAME}"; then sudo systemctl disable "${TRAEFIK_SERVICE_NAME}" && echo " Disabled." || echo -e "${RED}ERROR: Could not disable autostart.${NC}" >&2; else echo " Was not enabled or service unknown."; fi;
+    echo "[3/8] Removing service file..."; if [[ -f "${TRAEFIK_SERVICE_FILE}" ]]; then sudo rm -f "${TRAEFIK_SERVICE_FILE}" && echo " Deleted: ${TRAEFIK_SERVICE_FILE}" || echo -e "${RED}ERROR: Could not delete service file.${NC}" >&2; else echo " Not found: ${TRAEFIK_SERVICE_FILE}"; fi;
+    echo "[4/8] Reloading Systemd..."; sudo systemctl daemon-reload && echo " Reloaded." || echo -e "${RED}ERROR: daemon-reload failed.${NC}" >&2; sudo systemctl reset-failed "${TRAEFIK_SERVICE_NAME}" &> /dev/null || true;
+    echo "[5/8] Removing binary..."; if [[ -f "${TRAEFIK_BINARY_PATH}" ]]; then sudo rm -f "${TRAEFIK_BINARY_PATH}" && echo " Deleted: ${TRAEFIK_BINARY_PATH}" || echo -e "${RED}ERROR: Could not delete binary.${NC}" >&2; else echo " Not found: ${TRAEFIK_BINARY_PATH}"; fi;
+    echo "[6/8] Removing configs..."; if [[ -d "${TRAEFIK_CONFIG_DIR}" ]]; then sudo rm -rf "${TRAEFIK_CONFIG_DIR}" && echo " Deleted: ${TRAEFIK_CONFIG_DIR}" || echo -e "${RED}ERROR: Could not delete config directory.${NC}" >&2; else echo " Not found: ${TRAEFIK_CONFIG_DIR}"; fi;
+    echo "[7/8] Removing logs..."; if [[ -d "${TRAEFIK_LOG_DIR}" ]]; then sudo rm -rf "${TRAEFIK_LOG_DIR}" && echo " Deleted: ${TRAEFIK_LOG_DIR} (incl. ip_access.log etc.)" || echo -e "${RED}ERROR: Could not delete log directory.${NC}" >&2; else echo " Not found: ${TRAEFIK_LOG_DIR}"; fi;
+    echo "[8/8] Removing helper scripts & logrotate configs..."; # Combined
+     if [[ -f "${IPLOGGER_HELPER_SCRIPT}" ]]; then sudo rm -f "${IPLOGGER_HELPER_SCRIPT}" && echo " Deleted: ${IPLOGGER_HELPER_SCRIPT}" || echo -e "${RED}ERROR: Could not delete IP Logger script.${NC}" >&2; else echo " Not found: ${IPLOGGER_HELPER_SCRIPT}"; fi;
+     # AUTOPULL_HELPER_SCRIPT removed
+     if [[ -f "${IPLOGGER_LOGROTATE_CONF}" ]]; then sudo rm -f "${IPLOGGER_LOGROTATE_CONF}" && echo " Deleted: ${IPLOGGER_LOGROTATE_CONF}" || echo -e "${RED}ERROR: Could not delete IP Logger logrotate config.${NC}" >&2; else echo " Not found: ${IPLOGGER_LOGROTATE_CONF}"; fi;
+    echo ""; echo -e "${GREEN}===========================================${NC}"; echo -e "${GREEN} Uninstallation (or cleanup attempt) finished.${NC}"; echo -e "${YELLOW} Hopefully that was the right thing to do.${NC}"; echo -e "${GREEN}===========================================${NC}"; echo " Consider running 'sudo apt purge apache2-utils jq curl ... && sudo apt autoremove'"; echo "==========================================="; return 0
+} # End uninstall_traefik
+
+# --- NEW FUNCTIONS ---
 
 #===============================================================================
-# Funktion: Installierte Traefik Version prüfen
+# Function: Check Installed Traefik Version
 #===============================================================================
 show_traefik_version() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Installierte Traefik Version prüfen${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Check Installed Traefik Version${NC}"; echo -e "${MAGENTA}==================================================${NC}"
     if [[ -f "$TRAEFIK_BINARY_PATH" ]]; then
-        echo "Führe aus: ${TRAEFIK_BINARY_PATH} version"; echo "--------------------------------------------------";
-        sudo "${TRAEFIK_BINARY_PATH}" version 2>&1 || echo -e "${RED}FEHLER beim Ausführen.${NC}";
+        echo "Executing: ${TRAEFIK_BINARY_PATH} version"; echo "--------------------------------------------------";
+        if ! sudo "${TRAEFIK_BINARY_PATH}" version 2>&1; then echo -e "${RED}ERROR executing command.${NC}" >&2; return 1; fi;
         echo "--------------------------------------------------";
     else
-        echo -e "${RED}FEHLER: Traefik Binary (${TRAEFIK_BINARY_PATH}) nicht gefunden.${NC}";
+        echo -e "${RED}ERROR: Traefik binary (${TRAEFIK_BINARY_PATH}) not found.${NC}" >&2;
         return 1;
     fi;
     return 0
@@ -685,232 +1228,310 @@ show_traefik_version() {
 
 
 #===============================================================================
-# Haupt-Config checken (Hinweis für v3)
+# Function: Check Static Config (Hint for v3)
 #===============================================================================
 check_static_config() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Statische Traefik Konfiguration prüfen (Hinweis)${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}FEHLER: Statische Konfig (${STATIC_CONFIG_FILE}) nicht gefunden.${NC}"; return 1; fi
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Check Static Traefik Configuration (Hint)${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}ERROR: Static config (${STATIC_CONFIG_FILE}) not found.${NC}" >&2; return 1; fi
 
-    echo -e "${BLUE}INFO für Traefik v3:${NC}"
-    echo " Traefik v3 hat keinen separaten 'check'-Befehl mehr für die statische Konfiguration."
-    echo " Die Validierung der Datei '${STATIC_CONFIG_FILE}' findet statt, wenn"
-    echo " Traefik gestartet oder neu gestartet wird."
+    echo -e "${BLUE}INFO for Traefik v3:${NC}"
+    echo " Traefik v3 no longer has a separate 'check' command for the static configuration."
+    echo " Validation of the file '${STATIC_CONFIG_FILE}' happens when"
+    echo " Traefik is started or restarted."
     echo ""
-    echo -e "${YELLOW}Empfehlung:${NC}"
-    echo " 1. Bearbeiten Sie die Datei (Menüpunkt 2 -> 5)."
-    echo " 2. Versuchen Sie, Traefik neu zu starten (Menüpunkt 4 -> 3)."
-    echo " 3. Wenn der Neustart fehlschlägt, prüfen Sie die Logs (Menüpunkt 4 -> 7) auf Konfigurationsfehler."
+    echo -e "${YELLOW}Recommendation:${NC}"
+    echo " 1. Edit the file (Menu 2 -> 5)."
+    echo " 2. Try restarting Traefik (Menu 4 -> 3)."
+    echo " 3. If the restart fails, check the logs (Menu 4 -> 7) for configuration errors."
     echo "=================================================="
-    # Optional: YAML Syntax Lint hinzufügen, falls yamllint installiert ist
+    # Optional: Add YAML syntax lint if yamllint is installed
     if command -v yamllint &> /dev/null; then
-        echo -e "${BLUE}INFO: Prüfe grundlegende YAML-Syntax mit 'yamllint'...${NC}"
-        # Führe yamllint als der aktuelle Benutzer aus, falls sudo nicht nötig ist
+        echo -e "${BLUE}INFO: Checking basic YAML syntax with 'yamllint'...${NC}"
+        # Run yamllint as the current user if sudo is not needed
         if yamllint "${STATIC_CONFIG_FILE}"; then
-             echo -e "${GREEN}INFO: YAML-Syntax scheint OK zu sein (Grundprüfung).${NC}"
+             echo -e "${GREEN}INFO: YAML syntax seems OK (basic check).${NC}"
         else
-             echo -e "${RED}FEHLER: YAML-Syntaxfehler gefunden durch 'yamllint'!${NC}" >&2
-             echo -e "${YELLOW}        Dies prüft nicht die Traefik-spezifische Logik, nur die YAML-Formatierung.${NC}" >&2
-             # Gebe trotzdem 0 zurück, da es nur eine Hilfsprüfung ist und keine Traefik-Funktion blockiert
-             # return 1 # Ursprünglich: Fehler zurückgeben
+             echo -e "${RED}ERROR: YAML syntax error(s) found by 'yamllint'!${NC}" >&2
+             echo -e "${YELLOW}        This does not check Traefik-specific logic, only YAML formatting.${NC}" >&2
+             # Return 1 here if yamllint failed, as it indicates a syntax issue
+             # return 1 # Decided to return 0 as this is primarily an informational check function
         fi
          echo "=================================================="
     else
-         echo -e "${YELLOW}HINWEIS: 'yamllint' nicht gefunden. YAML-Syntaxprüfung übersprungen.${NC}"
-         echo -e "${YELLOW}           (Installieren mit: sudo apt install yamllint)${NC}"
+         echo -e "${YELLOW}HINT: 'yamllint' not found. YAML syntax check skipped.${NC}"
+         echo -e "${YELLOW}           (Install with: sudo apt install yamllint)${NC}"
          echo "=================================================="
     fi
-    return 0 # Gebe immer Erfolg zurück, da es nur ein Hinweis/Hilfscheck ist
+    return 0 # Always return 0 for the check function itself
 }
 
 #===============================================================================
-# Funktion: Statische Traefik Konfiguration bearbeiten
+# Function: Edit Static Traefik Configuration
 #===============================================================================
 edit_static_config() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Statische Traefik Konfiguration bearbeiten${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}FEHLER: Datei (${STATIC_CONFIG_FILE}) nicht gefunden.${NC}"; return 1; fi; local editor="${EDITOR:-nano}"; echo -e "${YELLOW}WARNUNG: Änderungen hier erfordern meist einen Traefik-Neustart!${NC}"; echo "--------------------------------------------------"; echo "Öffne '${STATIC_CONFIG_FILE}' mit '${editor}'..."; sleep 2
-    if sudo "$editor" "$STATIC_CONFIG_FILE"; then
-        echo ""; echo -e "${GREEN}Datei bearbeitet.${NC}";
-        # git_auto_commit entfernt
-        local c=false; ask_confirmation "Grundlegende YAML-Syntax prüfen (mit yamllint, falls installiert)?" c; if $c; then check_static_config; fi;
-        local r=false; ask_confirmation "Traefik neu starten?" r; if $r; then manage_service "restart"; fi;
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Edit Static Traefik Configuration${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}ERROR: File (${STATIC_CONFIG_FILE}) not found.${NC}" >&2; return 1; fi; local editor="${EDITOR:-nano}"; echo -e "${YELLOW}WARNING: Changes here usually require a Traefik restart!${NC}"; echo "--------------------------------------------------"; echo "Opening '${STATIC_CONFIG_FILE}' with '${editor}'..."; sleep 2
+    # Use sudo -E to preserve EDITOR environment variable
+    if sudo -E "$editor" "$STATIC_CONFIG_FILE"; then
+        echo ""; echo -e "${GREEN}File edited.${NC}";
+        # git_auto_commit removed
+        local c=false; ask_confirmation "Check basic YAML syntax (with yamllint, if installed)?" c; if $c; then check_static_config; fi;
+        local r=false; ask_confirmation "Restart Traefik?" r; if $r; then manage_service "restart"; fi;
     else
-         echo -e "${YELLOW}WARNUNG: Editor mit Fehler beendet.${NC}"; return 1;
+         echo -e "${YELLOW}WARNING: Editor exited with an error or file not saved.${NC}" >&2; return 1;
     fi; return 0
 }
 
 #===============================================================================
-# Funktion: Middleware Konfiguration bearbeiten
+# Function: Edit Middleware Configuration
 #===============================================================================
 edit_middlewares_config() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Middleware Konfiguration bearbeiten${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if [[ ! -f "$MIDDLEWARES_FILE" ]]; then echo -e "${RED}FEHLER: Datei (${MIDDLEWARES_FILE}) nicht gefunden.${NC}"; return 1; fi; local editor="${EDITOR:-nano}"; echo -e "${BLUE}INFO: Änderungen hier werden meist automatisch erkannt (watch=true).${NC}"; echo "--------------------------------------------------"; echo "Öffne '${MIDDLEWARES_FILE}' mit '${editor}'..."; sleep 2
-    if sudo "$editor" "$MIDDLEWARES_FILE"; then
-         echo ""; echo -e "${GREEN}Datei bearbeitet.${NC}";
-         # git_auto_commit entfernt
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Edit Middleware Configuration${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if [[ ! -f "$MIDDLEWARES_FILE" ]]; then echo -e "${RED}ERROR: File (${MIDDLEWARES_FILE}) not found.${NC}" >&2; return 1; fi; local editor="${EDITOR:-nano}"; echo -e "${BLUE}INFO: Changes here are usually detected automatically (watch=true).${NC}"; echo "--------------------------------------------------"; echo "Opening '${MIDDLEWARES_FILE}' with '${editor}'..."; sleep 2
+    # Use sudo -E to preserve EDITOR environment variable
+    # FIX: Corrected typo in variable name
+    if sudo -E "$editor" "$MIDDLEWARES_FILE"; then
+         echo ""; echo -e "${GREEN}File edited.${NC}";
+         # git_auto_commit removed
     else
-         echo -e "${YELLOW}WARNUNG: Editor mit Fehler beendet.${NC}"; return 1;
+         echo -e "${YELLOW}WARNING: Editor exited with an error or file not saved.${NC}" >&2; return 1;
     fi; return 0
 }
 
 #===============================================================================
-# Funktion: EntryPoints bearbeiten (${STATIC_CONFIG_FILE})
+# Function: Edit EntryPoints (${STATIC_CONFIG_FILE})
 #===============================================================================
 edit_entrypoints() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} EntryPoints bearbeiten (${STATIC_CONFIG_FILE})${NC}"; echo -e "${MAGENTA}==================================================${NC}";
-    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}FEHLER: Datei (${STATIC_CONFIG_FILE}) nicht gefunden.${NC}"; return 1; fi
-    echo -e "${BLUE}Aktueller 'entryPoints' Block (Versuch der Anzeige):${NC}"; echo "--------------------------------------------------";
-    # Versuch, den Block zu extrahieren (kann bei komplexer Datei fehlschlagen)
-    sudo awk '/^entryPoints:/ {p=1} p {print} /^[a-zA-Z#]+:/ && !/^entryPoints:/ {if (!/^\s*#/) p=0}' "${STATIC_CONFIG_FILE}" | grep -v -E "^(providers:|tls:|certificatesResolvers:|experimental:|api:|log:|accessLog:|global:)" || echo "(Anzeige fehlgeschlagen)"
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Edit EntryPoints (${STATIC_CONFIG_FILE})${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}ERROR: File (${STATIC_CONFIG_FILE}) not found.${NC}" >&2; return 1; fi
+    echo -e "${BLUE}Current 'entryPoints' block (attempting display):${NC}"; echo "--------------------------------------------------";
+    # Attempt to extract the block (might fail with complex files)
+    # Improved awk pattern to stop at the next top-level key or end of file
+    sudo awk '/^entryPoints:/ {p=1} p {print} /^[a-zA-Z_-]+:/ && !/^\s*#/ {if (p) p=0}' "${STATIC_CONFIG_FILE}" | grep -v -E "^(providers:|tls:|certificatesResolvers:|experimental:|api:|log:|accessLog:|global:)" || echo "(Display failed)"
     echo "--------------------------------------------------";
-    echo -e "${YELLOW}WICHTIG: Achten Sie auf die 'forwardedHeaders.trustedIPs' Einstellungen!${NC}";
-    echo -e "${YELLOW}Öffne die gesamte Datei (${STATIC_CONFIG_FILE}) zum Bearbeiten...${NC}";
-    edit_static_config # Ruft die Haupt-Bearbeitungsfunktion auf (welche auch Commit anbietet)
+    echo -e "${YELLOW}IMPORTANT: Pay attention to the 'forwardedHeaders.trustedIPs' settings!${NC}";
+    echo -e "${YELLOW}Opening the entire file (${STATIC_CONFIG_FILE}) for editing...${NC}";
+    edit_static_config # Calls the main edit function (which also offers commit)
     return $?
 }
 
 #===============================================================================
-# Funktion: Globale TLS Optionen bearbeiten (${STATIC_CONFIG_FILE})
+# Function: Edit Global TLS Options (${MIDDLEWARES_FILE})
 #===============================================================================
 edit_tls_options() {
-     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Globale TLS Optionen bearbeiten (${STATIC_CONFIG_FILE})${NC}"; echo -e "${MAGENTA}==================================================${NC}";
-     if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}FEHLER: Datei (${STATIC_CONFIG_FILE}) nicht gefunden.${NC}"; return 1; fi
-     echo -e "${BLUE}Aktueller 'tls:' Block (Versuch der Anzeige):${NC}"; echo "--------------------------------------------------";
-     # Versuch, den Block zu extrahieren (kann bei komplexer Datei fehlschlagen)
-     sudo awk '/^tls:/ {p=1} p {print} /^[a-zA-Z#]+:/ && !/^tls:/ {if (!/^\s*#/) p=0}' "${STATIC_CONFIG_FILE}" | grep -v -E "^(providers:|certificatesResolvers:|experimental:|api:|log:|accessLog:|global:|entryPoints:)" || echo "(Anzeige fehlgeschlagen)"
-     echo "--------------------------------------------------"; echo -e "${YELLOW}Öffne die gesamte Datei (${STATIC_CONFIG_FILE}) zum Bearbeiten...${NC}";
-     edit_static_config # Ruft die Haupt-Bearbeitungsfunktion auf (welche auch Commit anbietet)
+     # TLS options are now defined in middlewares.yml by default in this script
+     local tls_options_file="$MIDDLEWARES_FILE"
+     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Edit Global TLS Options (${tls_options_file})${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+     if [[ ! -f "$tls_options_file" ]]; then echo -e "${RED}ERROR: File (${tls_options_file}) not found.${NC}" >&2; return 1; fi
+     echo -e "${BLUE}Current 'tls:' block (attempting display):${NC}"; echo "--------------------------------------------------";
+     # Attempt to extract the block (might fail with complex files)
+     # Improved awk pattern to stop at the next top-level key or end of file
+     sudo awk '/^tls:/ {p=1} p {print} /^[a-zA-Z_-]+:/ && !/^\s*#/ {if (p) p=0}' "${tls_options_file}" | grep -v -E "^(http:|middlewares:|routers:|services:)" || echo "(Display failed)"
+     echo "--------------------------------------------------"; echo -e "${YELLOW}Opening the file (${tls_options_file}) for editing...${NC}";
+     # Call the middleware edit function
+     edit_middlewares_config
      return $?
 }
 
 #===============================================================================
-# Funktion: Dashboard Benutzer verwalten
+# Function: Manage Dashboard Users
 #===============================================================================
 manage_dashboard_users() {
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    if ! command -v htpasswd &> /dev/null; then echo -e "${RED}FEHLER: 'htpasswd' (Paket apache2-utils) nicht gefunden.${NC}"; check_dependencies; if ! command -v htpasswd &> /dev/null; then return 1; fi; fi
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    if ! command -v htpasswd &> /dev/null; then echo -e "${RED}ERROR: 'htpasswd' (package apache2-utils) not found.${NC}" >&2; check_dependencies; if ! command -v htpasswd &> /dev/null; then return 1; fi; fi
+
+    # Ensure the auth file exists before entering the loop if we're going to add users
+    if [[ ! -f "$TRAEFIK_AUTH_FILE" ]]; then
+        echo -e "${YELLOW}INFO: Auth file ${TRAEFIK_AUTH_FILE} does not exist, will be created if needed.${NC}"
+    fi
+
 
     while true; do
-        clear; print_header "Dashboard Benutzerverwaltung";
-        echo -e "| Auth-Datei: ${BOLD}${TRAEFIK_AUTH_FILE}${NC} |"
+        clear; print_header "Manage Dashboard Users";
+        echo -e "| Auth File: ${BOLD}${TRAEFIK_AUTH_FILE}${NC} |"
         echo "+-----------------------------------------+"
-        echo -e "|   ${BOLD}1)${NC} Benutzer hinzufügen                |"
-        echo -e "|   ${BOLD}2)${NC} Benutzer löschen                   |"
-        echo -e "|   ${BOLD}3)${NC} Passwort ändern                    |"
-        echo -e "|   ${BOLD}4)${NC} Benutzer auflisten                 |"
-        echo -e "|   ${BOLD}0)${NC} Zurück zum Hauptmenü               |"
-        echo "+-----------------------------------------+"; read -p "Auswahl [0-4]: " user_choice
+        echo -e "|   ${BOLD}1)${NC} Add User                         |"
+        echo -e "|   ${BOLD}2)${NC} Remove User                      |"
+        echo -e "|   ${BOLD}3)${NC} Change Password                  |"
+        echo -e "|   ${BOLD}4)${NC} List Users                       |"
+        echo -e "|   ${BOLD}0)${NC} Back to Main Menu                |"
+        echo "+-----------------------------------------+"; read -p "Choice [0-4]: " user_choice
 
         local changes_made=false
-        case $user_choice in
+        case "$user_choice" in # Quote user_choice
             1) # Add User
-                echo "--- Benutzer hinzufügen ---"
-                read -p "Neuer Benutzername: " nu; while [[ -z "$nu" ]]; do read -p "Benutzername (darf nicht leer sein): " nu; done
-                if sudo grep -q -E "^${nu}:" "${TRAEFIK_AUTH_FILE}" 2>/dev/null; then echo -e "${YELLOW}WARNUNG: Benutzer '${nu}' existiert bereits.${NC}"; else
-                    while true; do read -sp "Passwort für '${nu}': " np; echo; if [[ -z "$np" ]]; then echo -e "${RED}FEHLER: Passwort darf nicht leer sein.${NC}"; continue; fi; read -sp "Passwort bestätigen: " npc; echo; if [[ "$np" == "$npc" ]]; then break; else echo -e "${RED}FEHLER: Passwörter stimmen nicht überein.${NC}"; fi; done
-                    local htpasswd_cmd="sudo htpasswd -b"; if [[ ! -f "$TRAEFIK_AUTH_FILE" ]]; then htpasswd_cmd+=" -c"; echo -e "${BLUE}INFO: Auth-Datei ${TRAEFIK_AUTH_FILE} wird erstellt.${NC}"; fi
-                    if $htpasswd_cmd "${TRAEFIK_AUTH_FILE}" "${nu}" "${np}"; then echo -e "${GREEN}Benutzer '${nu}' hinzugefügt.${NC}"; sudo chmod 600 "${TRAEFIK_AUTH_FILE}"; changes_made=true; else echo -e "${RED}FEHLER beim Hinzufügen mit htpasswd (Code: $?).${NC}"; fi
+                echo "--- Add User ---"
+                read -p "New username: " nu; while [[ -z "$nu" ]]; do echo -e "${RED}ERROR: Username cannot be empty.${NC}" >&2; read -p "Username: " nu; done
+                # Check if user already exists using grep on the actual file
+                if sudo grep -q -E "^${nu}:" "${TRAEFIK_AUTH_FILE}" 2>/dev/null; then echo -e "${YELLOW}WARNING: User '${nu}' already exists.${NC}"; else
+                    while true; do read -sp "Password for '${nu}': " np; echo; if [[ -z "$np" ]]; then echo -e "${RED}ERROR: Password cannot be empty.${NC}" >&2; continue; fi; read -sp "Confirm password: " npc; echo; if [[ "$np" == "$npc" ]]; then break; else echo -e "${RED}ERROR: Passwords do not match.${NC}" >&2; fi; done
+                    local htpasswd_cmd="sudo htpasswd -b"; if [[ ! -f "$TRAEFIK_AUTH_FILE" ]]; then htpasswd_cmd="sudo htpasswd -cb"; echo -e "${BLUE}INFO: Auth file ${TRAEFIK_AUTH_FILE} will be created.${NC}"; fi
+                    if $htpasswd_cmd "${TRAEFIK_AUTH_FILE}" "${nu}" "${np}"; then echo -e "${GREEN}User '${nu}' added.${NC}"; sudo chmod 600 "${TRAEFIK_AUTH_FILE}" 2>/dev/null || echo -e "${YELLOW}WARNING: Could not set permissions for auth file.${NC}" >&2; changes_made=true; else echo -e "${RED}ERROR adding user with htpasswd (Code: $?).${NC}" >&2; fi
                 fi; ;;
             2) # Remove User
-                echo "--- Benutzer löschen ---"; if [[ ! -f "$TRAEFIK_AUTH_FILE" ]]; then echo -e "${RED}FEHLER: Auth-Datei ${TRAEFIK_AUTH_FILE} nicht gefunden.${NC}"; sleep 2; continue; fi
-                echo "Aktuelle Benutzer:"; users=(); i=1; while IFS=: read -r u p; do users+=("$u"); echo "    ${i}) ${u}"; ((i++)); done < <(sudo cat "$TRAEFIK_AUTH_FILE"); if [ ${#users[@]} -eq 0 ]; then echo "Keine Benutzer in der Datei gefunden."; sleep 2; continue; fi; echo "    0) Abbrechen"
-                read -p "Nr. des zu löschenden Benutzers: " choice_del; if ! [[ "$choice_del" =~ ^[0-9]+$ ]] || [[ "$choice_del" -lt 0 ]] || [[ "$choice_del" -gt ${#users[@]} ]]; then echo -e "${RED}FEHLER: Ungültige Auswahl.${NC}"; sleep 2; continue; fi; if [[ "$choice_del" -eq 0 ]]; then echo "Abbruch."; continue; fi
-                local idx_del=$((choice_del - 1)); local user_del="${users[$idx_del]}"; local confirm_del=false; ask_confirmation "${RED}Benutzer '${user_del}' wirklich löschen?${NC}" confirm_del
+                echo "--- Remove User ---"; if [[ ! -f "$TRAEFIK_AUTH_FILE" ]]; then echo -e "${RED}ERROR: Auth file ${TRAEFIK_AUTH_FILE} not found.${NC}" >&2; sleep 2; continue; fi
+                echo "Current Users:"; users=(); i=1;
+                # Read users from the file, skipping comments
+                while IFS=: read -r u p; do if [[ ! "$u" =~ ^# ]]; then users+=("$u"); echo "    ${i}) ${u}"; ((i++)); fi; done < <(sudo cat "$TRAEFIK_AUTH_FILE" 2>/dev/null) # Added 2>/dev/null
+                if [ ${#users[@]} -eq 0 ]; then echo "No users found in file."; sleep 2; continue; fi; echo "    0) Back"
+                read -p "Number of the user to delete: " choice_del; if ! [[ "$choice_del" =~ ^[0-9]+$ ]] || [[ "$choice_del" -lt 0 ]] || [[ "$choice_del" -gt ${#users[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; sleep 2; continue; fi; if [[ "$choice_del" -eq 0 ]]; then echo "Aborting."; continue; fi
+                local idx_del=$((choice_del - 1)); local user_del="${users[$idx_del]}"; local confirm_del=false; ask_confirmation "${RED}Really delete user '${user_del}'?${NC}" confirm_del
                 if $confirm_del; then
-                    # Sicherere Methode zum Löschen: Temporäre Datei erstellen
-                    if sudo grep -v "^${user_del}:" "${TRAEFIK_AUTH_FILE}" > "${TRAEFIK_AUTH_FILE}.tmp"; then
-                        if sudo mv "${TRAEFIK_AUTH_FILE}.tmp" "${TRAEFIK_AUTH_FILE}"; then
-                            sudo chmod 600 "${TRAEFIK_AUTH_FILE}" # Rechte wiederherstellen
-                            echo -e "${GREEN}Benutzer '${user_del}' gelöscht.${NC}"; changes_made=true;
+                    # Safer method to delete: Create a temporary file excluding the user
+                    local tmp_auth_file=$(mktemp "${TRAEFIK_AUTH_FILE}.tmp.XXXXXX")
+                    if sudo grep -v "^${user_del}:" "${TRAEFIK_AUTH_FILE}" > "$tmp_auth_file"; then
+                        if sudo mv "$tmp_auth_file" "${TRAEFIK_AUTH_FILE}"; then
+                            sudo chmod 600 "${TRAEFIK_AUTH_FILE}" 2>/dev/null || echo -e "${YELLOW}WARNING: Could not set permissions for auth file.${NC}" >&2 # Restore permissions
+                            echo -e "${GREEN}User '${user_del}' deleted.${NC}"; changes_made=true;
                         else
-                             echo -e "${RED}FEHLER: Konnte temporäre Datei nicht zurückverschieben.${NC}";
-                             sudo rm -f "${TRAEFIK_AUTH_FILE}.tmp"
+                             echo -e "${RED}ERROR: Could not move temporary file back.${NC}" >&2;
+                             sudo rm -f "$tmp_auth_file" 2>/dev/null
                         fi
                     else
-                        echo -e "${RED}FEHLER: Konnte Benutzer nicht aus Datei filtern (grep Fehler).${NC}";
-                        sudo rm -f "${TRAEFIK_AUTH_FILE}.tmp"
+                        echo -e "${RED}ERROR: Could not filter user from file (grep error).${NC}" >&2;
+                        sudo rm -f "$tmp_auth_file" 2>/dev/null
                     fi
                 fi; ;;
             3) # Change Password
-                 echo "--- Passwort ändern ---"; if [[ ! -f "$TRAEFIK_AUTH_FILE" ]]; then echo -e "${RED}FEHLER: Auth-Datei ${TRAEFIK_AUTH_FILE} nicht gefunden.${NC}"; sleep 2; continue; fi
-                 echo "Aktuelle Benutzer:"; users=(); i=1; while IFS=: read -r u p; do users+=("$u"); echo "    ${i}) ${u}"; ((i++)); done < <(sudo cat "$TRAEFIK_AUTH_FILE"); if [ ${#users[@]} -eq 0 ]; then echo "Keine Benutzer in der Datei gefunden."; sleep 2; continue; fi; echo "    0) Abbrechen"
-                 read -p "Nr. des Benutzers, dessen Passwort geändert werden soll: " choice_ch; if ! [[ "$choice_ch" =~ ^[0-9]+$ ]] || [[ "$choice_ch" -lt 0 ]] || [[ "$choice_ch" -gt ${#users[@]} ]]; then echo -e "${RED}FEHLER: Ungültige Auswahl.${NC}"; sleep 2; continue; fi; if [[ "$choice_ch" -eq 0 ]]; then echo "Abbruch."; continue; fi
+                 echo "--- Change Password ---"; if [[ ! -f "$TRAEFIK_AUTH_FILE" ]]; then echo -e "${RED}ERROR: Auth file ${TRAEFIK_AUTH_FILE} not found.${NC}" >&2; sleep 2; continue; fi
+                 echo "Current Users:"; users=(); i=1;
+                 # Read users from the file, skipping comments
+                 while IFS=: read -r u p; do if [[ ! "$u" =~ ^# ]]; then users+=("$u"); echo "    ${i}) ${u}"; ((i++)); fi; done < <(sudo cat "$TRAEFIK_AUTH_FILE" 2>/dev/null) # Added 2>/dev/null
+                 if [ ${#users[@]} -eq 0 ]; then echo "No users found in file."; sleep 2; continue; fi; echo "    0) Back"
+                 read -p "Number of the user whose password should be changed: " choice_ch; if ! [[ "$choice_ch" =~ ^[0-9]+$ ]] || [[ "$choice_ch" -lt 0 ]] || [[ "$choice_ch" -gt ${#users[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; sleep 2; continue; fi; if [[ "$choice_ch" -eq 0 ]]; then echo "Aborting."; continue; fi
                  local idx_ch=$((choice_ch - 1)); local user_ch="${users[$idx_ch]}"
-                 local new_pw; local new_pw_c; while true; do read -sp "Neues Passwort für '${user_ch}': " new_pw; echo; if [[ -z "$new_pw" ]]; then echo -e "${RED}FEHLER: Passwort darf nicht leer sein.${NC}"; continue; fi; read -sp "Neues Passwort bestätigen: " new_pw_c; echo; if [[ "$new_pw" == "$new_pw_c" ]]; then break; else echo -e "${RED}FEHLER: Passwörter stimmen nicht überein.${NC}"; fi; done
-                 if sudo htpasswd -b "${TRAEFIK_AUTH_FILE}" "${user_ch}" "${new_pw}"; then echo -e "${GREEN}Passwort für '${user_ch}' erfolgreich geändert.${NC}"; changes_made=true; else echo -e "${RED}FEHLER beim Ändern des Passworts mit htpasswd (Code: $?).${NC}"; fi; ;;
+                 local new_pw; local new_pw_c; while true; do read -sp "New password for '${user_ch}': " new_pw; echo; if [[ -z "$new_pw" ]]; then echo -e "${RED}ERROR: Password cannot be empty.${NC}" >&2; continue; fi; read -sp "Confirm new password: " new_pw_c; echo; if [[ "$new_pw" == "$new_pw_c" ]]; then break; else echo -e "${RED}ERROR: Passwords do not match.${NC}" >&2; fi; done
+                 if sudo htpasswd -b "${TRAEFIK_AUTH_FILE}" "${user_ch}" "${new_pw}"; then echo -e "${GREEN}Password for '${user_ch}' successfully changed.${NC}"; changes_made=true; else echo -e "${RED}ERROR changing password with htpasswd (Code: $?).${NC}" >&2; fi; ;;
             4) # List Users
-                echo "--- Benutzerliste ---"; if [[ -f "$TRAEFIK_AUTH_FILE" ]]; then echo "Benutzer in ${TRAEFIK_AUTH_FILE}:"; sudo grep -v '^#' "${TRAEFIK_AUTH_FILE}" | cut -d: -f1 | sed 's/^/ - /' || echo " (Datei ist leer oder Fehler beim Lesen)"; else echo -e "${RED}FEHLER: Auth-Datei (${TRAEFIK_AUTH_FILE}) nicht gefunden.${NC}"; fi ;;
+                echo "--- User List ---"; if [[ -f "$TRAEFIK_AUTH_FILE" ]]; then echo "Users in ${TRAEFIK_AUTH_FILE}:"; sudo grep -v '^#' "${TRAEFIK_AUTH_FILE}" 2>/dev/null | cut -d: -f1 | sed 's/^/ - /' || echo " (File is empty or error reading)"; else echo -e "${RED}ERROR: Auth file (${TRAEFIK_AUTH_FILE}) not found.${NC}" >&2; fi ;;
             0)
-                # git_auto_commit entfernt
+                # git_auto_commit removed
                 return 0 ;;
-            *) echo -e "${RED}FEHLER: Ungültige Auswahl.${NC}" ;;
-        esac; echo ""; read -p "... Enter drücken für Benutzermenü ..." dummy_user
+            *) echo -e "${RED}ERROR: Invalid choice.${NC}" >&2 ;;
+        esac; echo ""; read -p "... Press Enter for user menu ..." dummy_user
     done
-} # Ende Funktion manage_dashboard_users
+} # End manage_dashboard_users
 
 
 #===============================================================================
-# Funktion: Beispiel Fail2Ban Konfiguration für Traefik Auth
+# Function: Show Example Fail2Ban Configuration for Traefik Auth
 #===============================================================================
 generate_fail2ban_config() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Beispiel Fail2Ban Konfiguration für Traefik Auth${NC}"; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${YELLOW}INFO: Nur ein Beispiel! Fail2Ban muss separat installiert und konfiguriert sein.${NC}"; echo -e "${YELLOW}      Stellen Sie sicher, dass Traefik Access Logs im JSON-Format sind.${NC}"; echo "--------------------------------------------------"; echo -e "${BOLD}1. Filter erstellen oder anpassen (/etc/fail2ban/filter.d/traefik-auth.conf):${NC}"; echo "--------------------------------------------------"; cat << EOF
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Example Fail2Ban Configuration for Traefik Auth${NC}"; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${YELLOW}INFO: Example only! Fail2Ban must be installed and configured separately.${NC}"; echo -e "${YELLOW}      Ensure Traefik Access Logs are in JSON format.${NC}"; echo "--------------------------------------------------"; echo -e "${BOLD}1. Create or adapt filter (/etc/fail2ban/filter.d/traefik-auth.conf):${NC}"; echo "--------------------------------------------------"; cat << EOF
 [Definition]
-# Sucht nach JSON-Logeinträgen mit Status 401 für den Dashboard-Router
-# Beachten Sie: Der RouterName muss ggf. angepasst werden, falls er nicht 'traefik-dashboard-secure@file' heißt.
-# Regex angepasst für typisches Traefik JSON Format
+# Searches for JSON log entries with status 401 for the dashboard router
+# Note: The RouterName might need adjustment if it's not 'traefik-dashboard-secure@file'.
+# Regex adapted for typical Traefik JSON format
 failregex = ^{.*"ClientHost":"<HOST>".*"RouterName":"traefik-dashboard-secure@file".*"StatusCode":401.*$
-            ^{.*"ClientAddr":"<HOST>".*"RouterName":"traefik-dashboard-secure@file".*"status":401.*$ # Alternative Feldnamen
-            # Ggf. weitere Varianten hinzufügen, je nach Log-Details
+            ^{.*"ClientAddr":"<HOST>".*"RouterName":"traefik-dashboard-secure@file".*"status":401.*$ # Alternative field names
+            # Add other variants if necessary, depending on log details
 ignoreregex =
-# Datum/Zeit Format (falls nötig, oft automatisch erkannt)
+# Date/Time Format (if needed, often detected automatically)
 # datepattern = %%Y-%%m-%%dT%%H:%%M:%%S(%%z|Z)
 EOF
-    echo ""; echo "--------------------------------------------------"; echo -e "${BOLD}2. Jail aktivieren (in /etc/fail2ban/jail.local oder /etc/fail2ban/jail.d/custom.conf):${NC}"; echo "--------------------------------------------------"; cat << EOF
+    echo ""; echo "--------------------------------------------------"; echo -e "${BOLD}2. Activate jail (in /etc/fail2ban/jail.local or /etc/fail2ban/jail.d/custom.conf):${NC}"; echo "--------------------------------------------------"; cat << EOF
 [traefik-auth]
 enabled   = true
-port      = http,https # Prüfe Ports 80 und 443
-filter    = traefik-auth # Name der Filterdatei ohne .conf
-logpath   = ${TRAEFIK_LOG_DIR}/access.log # Pfad zum Access Log prüfen!
-maxretry  = 5  # Anzahl Versuche
-findtime  = 600 # Zeitraum für Versuche (Sekunden)
-bantime   = 3600 # Sperrdauer (Sekunden)
-# action = %(action_mwl)s # Beispielaktion (blockt und loggt)
+port      = http,https # Check ports 80 and 443
+filter    = traefik-auth # Name of the filter file without .conf
+logpath   = ${TRAEFIK_LOG_DIR}/access.log # Check path to Access Log!
+maxretry  = 5  # Number of attempts
+findtime  = 600 # Time window for attempts (seconds)
+bantime   = 3600 # Ban duration (seconds)
+# action = %(action_mwl)s # Example action (blocks and logs)
 EOF
-    echo "--------------------------------------------------"; echo -e "${YELLOW}WICHTIG: Pfade (logpath), Filtername, RouterName im Regex, Zeiten, Ports & Aktionen ggf. anpassen!${NC}"; echo "         Nach Änderungen: 'sudo systemctl restart fail2ban' und Status prüfen ('fail2ban-client status traefik-auth')."; echo "=================================================="; return 0
+    echo "--------------------------------------------------"; echo -e "${YELLOW}IMPORTANT: Adapt paths (logpath), filter name, RouterName in regex, times, ports & actions if necessary!${NC}"; echo "         After changes: 'sudo systemctl restart fail2ban' and check status ('fail2ban-client status traefik-auth')."; echo "=================================================="; return 0
 }
 
 #===============================================================================
-# Funktion: Zertifikats-Details anzeigen (aus ${ACME_TLS_FILE})
+# Function: Show Certificate Details (from ${ACME_TLS_FILE})
 #===============================================================================
 show_certificate_info() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Zertifikats-Details anzeigen (aus ${ACME_TLS_FILE})${NC}"; echo -e "${MAGENTA}==================================================${NC}";
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    if ! command -v jq &> /dev/null; then echo -e "${RED}FEHLER: 'jq' benötigt.${NC}"; check_dependencies; if ! command -v jq &> /dev/null; then return 1; fi; fi; if ! command -v openssl &> /dev/null; then echo -e "${RED}FEHLER: 'openssl' benötigt.${NC}"; check_dependencies; if ! command -v openssl &> /dev/null; then return 1; fi; fi
-    if [[ ! -f "$ACME_TLS_FILE" ]]; then echo -e "${RED}FEHLER: ACME Speicherdatei (${ACME_TLS_FILE}) nicht gefunden.${NC}"; return 1; fi
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Show Certificate Details (from ${ACME_TLS_FILE})${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    if ! command -v jq &> /dev/null; then echo -e "${RED}ERROR: 'jq' required.${NC}" >&2; check_dependencies; if ! command -v jq &> /dev/null; then return 1; fi; fi; if ! command -v openssl &> /dev/null; then echo -e "${RED}ERROR: 'openssl' required.${NC}" >&2; check_dependencies; if ! command -v openssl &> /dev/null; then return 1; fi; fi
+    if [[ ! -f "$ACME_TLS_FILE" ]]; then echo -e "${RED}ERROR: ACME storage file (${ACME_TLS_FILE}) not found.${NC}" >&2; return 1; fi
 
-    echo -e "${BLUE}INFO: Lese Zertifikate aus ${ACME_TLS_FILE}...${NC}"; echo "--------------------------------------------------"; local resolver_key; resolver_key=$(sudo jq -r 'keys | .[0]' "${ACME_TLS_FILE}" 2>/dev/null); if [[ -z "$resolver_key" ]]; then echo -e "${RED}FEHLER: Konnte keinen ACME-Resolver-Schlüssel in der Datei finden.${NC}"; return 1; fi; echo -e "${BLUE}Verwende Daten für Resolver: ${resolver_key}${NC}"
-    local cert_count; cert_count=$(sudo jq --arg key "$resolver_key" '.[$key].Certificates | length' "${ACME_TLS_FILE}" 2>/dev/null); if [[ -z "$cert_count" ]]; then cert_count=0; fi; if [[ "$cert_count" -eq 0 ]]; then echo -e "${YELLOW}Keine Zertifikate für Resolver '${resolver_key}' in der Datei gefunden.${NC}"; return 0; fi
-    echo "Gefundene Zertifikate (${cert_count}):"
-    for (( i=0; i<cert_count; i++ )); do echo -e "${CYAN}--- Zertifikat $((i+1)) ---${NC}"; local main_domain sans cert_base64; main_domain=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].domain.main // empty' "${ACME_TLS_FILE}"); sans=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].domain.sans | if . then map(" - " + .) | join("\n") else empty end' "${ACME_TLS_FILE}"); cert_base64=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].certificate // empty' "${ACME_TLS_FILE}"); echo -e "  ${BOLD}Haupt-Domain:${NC} ${main_domain:-N/A}"; if [[ -n "$sans" ]]; then echo -e "  ${BOLD}Alternativen:${NC}\n${sans}"; fi
-        if [[ -n "$cert_base64" ]]; then local end_date issuer subject cert_info cert_pem; cert_pem=$(echo "$cert_base64" | base64 -d); if [[ -n "$cert_pem" ]]; then cert_info=$(echo "$cert_pem" | openssl x509 -noout -enddate -subject -issuer 2>/dev/null); if [[ $? -eq 0 && -n "$cert_info" ]]; then end_date=$(echo "$cert_info" | grep '^notAfter=' | cut -d= -f2-); issuer=$(echo "$cert_info" | grep '^issuer=' | sed 's/issuer=//'); subject=$(echo "$cert_info" | grep '^subject=' | sed 's/subject=//'); echo -e "  ${BOLD}Gültig bis:${NC}   ${GREEN}${end_date}${NC}"; echo -e "  ${BOLD}Aussteller:${NC}  ${issuer}"; else echo -e "  ${YELLOW}Konnte Zertifikatsdetails nicht mit OpenSSL auslesen.${NC}"; fi; else echo -e "  ${YELLOW}Konnte Zertifikat nicht dekodieren (base64 Fehler?).${NC}"; fi; else echo -e "  ${YELLOW}Keine Zertifikatsdaten (certificate Feld) im JSON gefunden.${NC}"; fi; done
-    echo "--------------------------------------------------"; echo -e "${YELLOW}HINWEIS: Angezeigte Daten stammen aus der ${ACME_TLS_FILE}.${NC}"; echo -e "${YELLOW}         Ablaufdaten können durch automatische Erneuerung abweichen.${NC}"; echo "=================================================="; return 0
-} # Ende show_certificate_info
+    echo -e "${BLUE}INFO: Reading certificates from ${ACME_TLS_FILE}...${NC}"; echo "--------------------------------------------------";
+    local resolver_key; resolver_key=$(sudo jq -r 'keys | .[0]' "${ACME_TLS_FILE}" 2>/dev/null);
+    if [[ -z "$resolver_key" || "$resolver_key" == "null" ]]; then echo -e "${RED}ERROR: Could not find ACME resolver key in file or file is empty/invalid.${NC}" >&2; return 1; fi;
+    echo -e "${BLUE}Using data for resolver: ${resolver_key}${NC}"
+    local cert_count; cert_count=$(sudo jq --arg key "$resolver_key" '.[$key].Certificates | length' "${ACME_TLS_FILE}" 2>/dev/null);
+    if [[ -z "$cert_count" || "$cert_count" == "null" ]]; then cert_count=0; fi;
+    if [[ "$cert_count" -eq 0 ]]; then echo -e "${YELLOW}No certificates found for resolver '${resolver_key}' in the file.${NC}"; return 0; fi
+
+    echo "Found certificates (${cert_count}):"
+    for (( i=0; i<cert_count; i++ )); do
+        echo -e "${CYAN}--- Certificate $((i+1)) ---${NC}";
+        local main_domain sans cert_base64;
+        main_domain=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].domain.main // empty' "${ACME_TLS_FILE}" 2>/dev/null);
+        sans=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].domain.sans | if . then map(" - " + .) | join("\n") else empty end' "${ACME_TLS_FILE}" 2>/dev/null);
+        cert_base64=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].certificate // empty' "${ACME_TLS_FILE}" 2>/dev/null);
+
+        echo -e "  ${BOLD}Main Domain:${NC} ${main_domain:-N/A}";
+        if [[ -n "$sans" ]]; then echo -e "  ${BOLD}Alternatives:${NC}\n${sans}"; fi
+
+        if [[ -n "$cert_base64" ]]; then
+            local end_date issuer subject cert_info cert_pem;
+            cert_pem=$(echo "$cert_base64" | base64 -d 2>/dev/null);
+            if [[ -n "$cert_pem" ]]; then
+                # Use openssl to get cert info from PEM format
+                cert_info=$(echo "$cert_pem" | openssl x509 -noout -enddate -subject -issuer 2>/dev/null);
+                if [[ $? -eq 0 && -n "$cert_info" ]]; then
+                    end_date=$(echo "$cert_info" | grep '^notAfter=' | cut -d= -f2-);
+                    issuer=$(echo "$cert_info" | grep '^issuer=' | sed 's/issuer=//');
+                    subject=$(echo "$cert_info" | grep '^subject=' | sed 's/subject=//');
+                    echo -e "  ${BOLD}Valid until:${NC}   ${GREEN}${end_date}${NC}";
+                    echo -e "  ${BOLD}Issuer:${NC}      ${issuer}";
+                    # echo -e "  ${BOLD}Subject:${NC}     ${subject}"; # Subject often redundant with main_domain/sans
+                else
+                    echo -e "  ${YELLOW}Could not read certificate details with OpenSSL.${NC}" >&2;
+                fi;
+            else
+                echo -e "  ${YELLOW}Could not decode certificate (base64 error?).${NC}" >&2;
+            fi;
+        else
+             echo -e "  ${YELLOW}No certificate data (certificate field) found in JSON.${NC}";
+        fi
+    done
+    echo "--------------------------------------------------"; echo -e "${YELLOW}HINT: Displayed data comes from ${ACME_TLS_FILE}.${NC}"; echo -e "${YELLOW}         Expiration dates may differ due to automatic renewal.${NC}"; echo "=================================================="; return 0
+} # End show_certificate_info
 
 #===============================================================================
-# Funktion: Backend-Erreichbarkeit testen
+# Function: Test Backend Connectivity
 #===============================================================================
 test_backend_connectivity() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Backend-Erreichbarkeit testen${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if ! command -v curl &> /dev/null; then echo -e "${RED}FEHLER: 'curl' nicht gefunden.${NC}"; check_dependencies; if ! command -v curl &> /dev/null; then return 1; fi; fi; read -p "Interne URL des Backends (z.B. http://192.168.1.50:8080 oder https://service.local): " url; while [[ -z "$url" ]]; do read -p "URL (darf nicht leer sein): " url; done
-    echo "--------------------------------------------------"; echo "Teste Verbindung zu: ${url}"; local opts="-vL --connect-timeout 5"; local insecure_flag=""; local insecure_opt=""; if [[ "$url" == https://* ]]; then local ignore_ssl=false; ask_confirmation "SSL/TLS-Zertifikat des Backends ignorieren (unsicher, für selbst-signierte Certs)? " ignore_ssl; if $ignore_ssl; then insecure_opt="-k"; insecure_flag="(SSL-Check ignoriert)"; else insecure_flag="(SSL-Check aktiv)"; fi; opts="-vL${insecure_opt} --connect-timeout 5"; fi; echo "Führe aus: curl ${opts} ${url} ${insecure_flag}"; echo "--------------------------------------------------"; local curl_output; curl_output=$(curl $opts "${url}" 2>&1); local curl_exit_code=$?; echo "$curl_output"; echo; if [[ $curl_exit_code -eq 0 ]]; then echo "--------------------------------------------------"; echo -e "${GREEN}TEST ERFOLGREICH: Verbindung OK (Curl Exit Code: 0, siehe Ausgabe oben).${NC}"; else echo "--------------------------------------------------"; echo -e "${RED}TEST FEHLGESCHLAGEN: Verbindung zu '${url}' nicht möglich (Curl Exit Code: $curl_exit_code).${NC}"; echo -e "${RED}Mögliche Ursachen: Netzwerkproblem, Firewall, Dienst nicht erreichbar, falsche URL/Port, SSL-Problem.${NC}"; return 1; fi; echo "=================================================="; return 0
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Test Backend Connectivity${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if ! command -v curl &> /dev/null; then echo -e "${RED}ERROR: 'curl' not found.${NC}" >&2; check_dependencies; if ! command -v curl &> /dev/null; then return 1; fi; fi;
+    read -p "Internal URL of the backend (e.g., http://192.168.1.50:8080 or https://service.local): " url; while [[ -z "$url" ]]; do echo -e "${RED}ERROR: URL cannot be empty.${NC}" >&2; read -p "URL: " url; done
+    echo "--------------------------------------------------"; echo "Testing connection to: ${url}";
+    local opts="-vL --connect-timeout 5 --max-time 10"; # Added max-time
+    local insecure_flag=""; local insecure_opt="";
+    if [[ "$url" == https://* ]]; then
+        local ignore_ssl=false; ask_confirmation "Ignore backend SSL/TLS certificate (insecure, for self-signed certs)? " ignore_ssl;
+        if $ignore_ssl; then insecure_opt="-k"; insecure_flag="(SSL check ignored)"; else insecure_flag="(SSL check active)"; fi;
+        opts="-vL${insecure_opt} --connect-timeout 5 --max-time 10";
+    fi;
+    echo "Executing: curl ${opts} \"${url}\" ${insecure_flag}"; # Quote URL
+    echo "--------------------------------------------------";
+    local curl_output;
+    # Capture stderr and stdout
+    if curl_output=$(curl $opts "${url}" 2>&1); then
+        local curl_exit_code=0
+    else
+        local curl_exit_code=$?
+    fi
+    echo "$curl_output"; echo;
+    if [[ $curl_exit_code -eq 0 ]]; then echo "--------------------------------------------------"; echo -e "${GREEN}TEST SUCCESSFUL: Connection OK (Curl Exit Code: 0, see output above).${NC}"; else echo "--------------------------------------------------"; echo -e "${RED}TEST FAILED: Connection to '${url}' not possible (Curl Code: $curl_exit_code).${NC}" >&2; echo -e "${RED}Possible causes: Network problem, Firewall, Service not reachable, wrong URL/Port, SSL problem.${NC}" >&2; return 1; fi; echo "=================================================="; return 0
 }
 
 #===============================================================================
-# Funktion: Prüfe lauschende Ports für Traefik (80/443) - Verbesserte Logik
+# Function: Check Listening Ports for Traefik (80/443) - Improved Logic
 #===============================================================================
 check_listening_ports() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Prüfe lauschende Ports für Traefik (80/443)${NC}"; echo -e "${MAGENTA}==================================================${NC}";
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    if ! command -v ss &> /dev/null; then echo -e "${RED}FEHLER: 'ss' (Paket iproute2) nicht gefunden.${NC}"; check_dependencies; if ! command -v ss &> /dev/null; then return 1; fi; fi
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Check Listening Ports for Traefik (80/443)${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    if ! command -v ss &> /dev/null; then echo -e "${RED}ERROR: 'ss' (package iproute2) not found.${NC}" >&2; check_dependencies; if ! command -v ss &> /dev/null; then return 1; fi; fi
 
     local listens_80=false
     local listens_443=false
@@ -918,56 +1539,57 @@ check_listening_ports() {
     local output_ss=""
     local pid
 
-    # Versuche PID zu ermitteln
-    pid=$(systemctl show --property MainPID --value ${TRAEFIK_SERVICE_NAME} 2>/dev/null || pgrep -f "^${TRAEFIK_BINARY_PATH}.*--configfile=${STATIC_CONFIG_FILE}" || pgrep -o traefik || echo '????')
+    # Try to determine PID
+    pid=$(systemctl show --property MainPID --value "${TRAEFIK_SERVICE_NAME}" 2>/dev/null || pgrep -f "^${TRAEFIK_BINARY_PATH}.*--configfile=${STATIC_CONFIG_FILE}" || pgrep -o traefik || echo '????')
 
-    echo "Suche mit 'ss' nach Traefik auf Port 80/443...";
+    echo "Searching with 'ss' for Traefik on Port 80/443...";
     if [[ "$pid" == "????" || -z "$pid" ]]; then
-        echo -e "${YELLOW}WARNUNG: Konnte Traefik PID nicht eindeutig ermitteln. Prüfe Ports ohne PID-Filterung.${NC}";
-        # Prüfe Ports ohne PID, weniger zuverlässig
-        output_ss=$(sudo ss -tlpn '( sport = :80 or sport = :443 )' 2>/dev/null || echo "FEHLER_SS")
+        echo -e "${YELLOW}WARNING: Could not determine Traefik PID uniquely. Checking ports without PID filtering.${NC}" >&2;
+        # Check ports without PID, less reliable
+        output_ss=$(sudo ss -tlpn '( sport = :80 or sport = :443 )' 2>&1 || echo "ERROR_SS")
     else
-        echo "INFO: Prüfe auf Prozess-ID(s): ${pid}";
+        echo "INFO: Checking for process ID(s): ${pid}";
         pid_found=true
-        # Hole alle lauschenden Sockets für die PID
-        output_ss=$(sudo ss -tlpn | grep "pid=${pid}," 2>/dev/null || echo "") # Gib leeren String zurück, wenn grep nichts findet
+        # Get all listening sockets for the PID(s)
+        # Build a grep-compatible expression for multiple PIDs if pgrep returns multiple
+        local pid_pattern=$(echo "$pid" | sed -e 's/ /|/g' -e 's/^/(/' -e 's/$/)/')
+        output_ss=$(sudo ss -tlpn 2>&1 | grep -E "pid=(${pid_pattern})," || echo "") # Capture stderr, return empty string if grep fails/finds nothing
+         if [[ "$output_ss" == *"ERROR_SS"* ]]; then # Check if ss itself failed
+             echo -e "${RED}ERROR: Could not execute 'ss' successfully.${NC}" >&2; return 1;
+         fi
     fi
 
-    if [[ "$output_ss" == "FEHLER_SS" ]]; then
-        echo -e "${RED}FEHLER: Konnte 'ss' nicht erfolgreich ausführen.${NC}"; return 1;
-    fi
+    echo "--- Result of Port Check ---";
+    echo "$output_ss" # Show the ss output
 
-
-    echo "--- Ergebnis der Port-Prüfung ---";
-
-    # Prüfe, ob Port 80 im (ggf. gefilterten) Output vorkommt
+    # Check if Port 80 is in the (potentially filtered) output
     if echo "$output_ss" | grep -q -E ':(80)\s'; then
         listens_80=true
-        echo -e " ${GREEN}OK:${NC} Prozess (PID ${pid:-unbekannt}) scheint auf Port 80 zu lauschen."
+        echo -e " ${GREEN}OK:${NC} Process (PID ${pid:-unknown}) seems to be listening on port 80."
     else
-        echo -e " ${RED}FEHLER:${NC} Prozess (PID ${pid:-unbekannt}) scheint NICHT auf Port 80 zu lauschen!"
+        echo -e " ${RED}ERROR:${NC} Process (PID ${pid:-unknown}) does NOT seem to be listening on port 80!" >&2
     fi
 
-     # Prüfe, ob Port 443 im (ggf. gefilterten) Output vorkommt
+     # Check if Port 443 is in the (potentially filtered) output
     if echo "$output_ss" | grep -q -E ':(443)\s'; then
         listens_443=true
-        echo -e " ${GREEN}OK:${NC} Prozess (PID ${pid:-unbekannt}) scheint auf Port 443 zu lauschen."
+        echo -e " ${GREEN}OK:${NC} Process (PID ${pid:-unknown}) seems to be listening on port 443."
     else
-        echo -e " ${RED}FEHLER:${NC} Prozess (PID ${pid:-unbekannt}) scheint NICHT auf Port 443 zu lauschen!"
+        echo -e " ${RED}ERROR:${NC} Process (PID ${pid:-unknown}) does NOT seem to be listening on port 443!" >&2
     fi
 
-    # Zusätzlicher Hinweis bei Problemen
+    # Additional hints for problems
     if ! $listens_80 || ! $listens_443; then
-         echo -e "${YELLOW}HINWEIS: Wenn Traefik läuft, aber Ports nicht gefunden werden:${NC}"
-         echo -e "${YELLOW}  - Prüfen Sie die 'address'-Einstellung in der 'traefik.yaml' unter 'entryPoints'.${NC}"
-         echo -e "${YELLOW}  - Führen Sie 'sudo ss -tlpn | grep -E \":80 |:443 \"' manuell aus.${NC}"
+         echo -e "${YELLOW}HINT: If Traefik is running but ports are not found:${NC}"
+         echo -e "${YELLOW}  - Check the 'address' setting in 'traefik.yaml' under 'entryPoints'.${NC}"
+         echo -e "${YELLOW}  - Run 'sudo ss -tlpn | grep -E \":80 |:443 \"' manually.${NC}"
          if ! $pid_found; then
-             echo -e "${YELLOW}  - Die PID konnte nicht ermittelt werden, die Prüfung war ungenau.${NC}"
+             echo -e "${YELLOW}  - The PID could not be determined, the check was inaccurate.${NC}"
          elif [[ -z "$output_ss" ]]; then
-             echo -e "${YELLOW}  - Die PID ${pid} wurde gefunden, aber sie lauscht nicht auf den erwarteten Ports oder 'ss'-Ausgabe ist leer.${NC}"
+             echo -e "${YELLOW}  - The PID(s) ${pid} was/were found, but it's not listening on the expected ports or 'ss' output is empty.${NC}"
          fi
          echo "==================================================";
-         return 1 # Melde Fehler, wenn ein Port fehlt
+         return 1 # Report error if a port is missing
     fi
 
     echo "==================================================";
@@ -976,234 +1598,275 @@ check_listening_ports() {
 
 
 #===============================================================================
-# Funktion: Aktive Konfiguration anzeigen (via Traefik API)
+# Function: Show Active Configuration (via Traefik API)
 #===============================================================================
 show_active_config() {
-     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Aktive Konfiguration anzeigen (via Traefik API)${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi; if ! command -v curl &> /dev/null; then echo -e "${RED}FEHLER: 'curl' nicht gefunden.${NC}"; check_dependencies; if ! command -v curl &> /dev/null; then return 1; fi; fi; if ! command -v jq &> /dev/null; then echo -e "${RED}FEHLER: 'jq' nicht gefunden.${NC}"; check_dependencies; if ! command -v jq &> /dev/null; then return 1; fi; fi
+     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Show Active Configuration (via Traefik API)${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi; if ! command -v curl &> /dev/null; then echo -e "${RED}ERROR: 'curl' not found.${NC}" >&2; check_dependencies; if ! command -v curl &> /dev/null; then return 1; fi; fi; if ! command -v jq &> /dev/null; then echo -e "${RED}ERROR: 'jq' not found.${NC}" >&2; check_dependencies; if ! command -v jq &> /dev/null; then return 1; fi; fi
 
-    local api_url="http://127.0.0.1:8080/api" # Sicherer: Nur localhost
-    local dashboard_domain=""; if [[ -f "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" ]]; then dashboard_domain=$(grep -oP 'Host\(\`\K[^`]*' "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" || true); fi
-    local api_insecure=false; if awk '/^api:/ {flag=1; next} /^[a-zA-Z#]+:/ {if (!/^\s*#/) flag=0} flag && /^\s*insecure:\s*true/' "${STATIC_CONFIG_FILE}" | grep -q 'true'; then api_insecure=true; fi
+    local api_url="http://127.0.0.1:8080/api" # Default insecure API address
+    local dashboard_domain="";
+    # Check if the dashboard dynamic config file exists and extract the domain
+    if [[ -f "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" ]]; then
+        dashboard_domain=$(grep -oP 'Host\(\`\K[^`]*' "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" 2>/dev/null || true);
+    fi
+
+    local api_insecure=false;
+    # Check if 'api.insecure: true' is explicitly set in the static config
+    if sudo awk '/^api:/ {flag=1; next} /^[a-zA-Z#]+:/ {if (!/^\s*#/) flag=0} flag && /^\s*insecure:\s*true/' "${STATIC_CONFIG_FILE}" 2>/dev/null | grep -q 'true'; then
+        api_insecure=true;
+    fi
 
     if $api_insecure; then
-        echo -e "${BLUE}INFO: Versuche API über Standard-URL (${api_url}), da 'insecure: true' aktiv zu sein scheint.${NC}";
-        local api_code; api_code=$(curl --connect-timeout 2 -s -o /dev/null -w "%{http_code}" "${api_url}/rawdata");
+        echo -e "${BLUE}INFO: Attempting API via standard URL (${api_url}), as 'insecure: true' seems active.${NC}";
+        local api_code; api_code=$(curl --connect-timeout 2 -s -o /dev/null -w "%{http_code}" "${api_url}/rawdata" 2>/dev/null);
         if [[ "$api_code" == "200" ]]; then
-            echo -e "${GREEN}INFO: API unter ${api_url} erreichbar.${NC}"; echo "--- Aktive HTTP Router ---"; if ! curl -s "${api_url}/http/routers" | jq '.'; then echo -e "${RED}FEHLER beim Abfragen/Parsen der Router.${NC}"; fi; echo ""; echo "--- Aktive HTTP Services ---"; if ! curl -s "${api_url}/http/services" | jq '.'; then echo -e "${RED}FEHLER beim Abfragen/Parsen der Services.${NC}"; fi; echo "--------------------------";
+            echo -e "${GREEN}INFO: API reachable at ${api_url}.${NC}";
+            echo "--- Active HTTP Routers ---";
+            if ! curl -s "${api_url}/http/routers" 2>/dev/null | jq '.'; then echo -e "${RED}ERROR querying/parsing routers.${NC}" >&2; fi;
+            echo "";
+            echo "--- Active HTTP Services ---";
+            if ! curl -s "${api_url}/http/services" 2>/dev/null | jq '.'; then echo -e "${RED}ERROR querying/parsing services.${NC}" >&2; fi;
+            echo "--------------------------";
         else
-            echo -e "${RED}FEHLER: API unter ${api_url} nicht erreichbar (Code: $api_code), obwohl 'insecure: true' gesetzt ist.${NC}";
-            echo -e "${YELLOW}         Prüfen Sie, ob die API in ${STATIC_CONFIG_FILE} wirklich aktiviert ist ('api: { dashboard: true }').${NC}";
+            echo -e "${RED}ERROR: API at ${api_url} not reachable (Code: $api_code), although 'insecure: true' is set.${NC}" >&2;
+            echo -e "${YELLOW}         Check if the API is actually enabled in ${STATIC_CONFIG_FILE} ('api: { dashboard: true }').${NC}";
+            echo -e "${YELLOW}         Ensure no other service is blocking port 8080.${NC}";
             return 1
         fi
     else
-        echo -e "${YELLOW}WARNUNG: API ist nicht im unsicheren Modus ('insecure: false').${NC}";
+        echo -e "${YELLOW}WARNING: API is not in insecure mode ('insecure: false').${NC}";
         if [[ -n "$dashboard_domain" ]]; then
-             echo -e "${BLUE}INFO: API ist über das Dashboard (HTTPS + Auth) unter https://${dashboard_domain}/api erreichbar.${NC}";
-             echo "       Verwenden Sie curl manuell mit Authentifizierung, z.B.:";
-             echo "       ${BOLD}curl -u BENUTZERNAME https://${dashboard_domain}/api/http/routers | jq${NC}";
-             echo "       (Passwort wird abgefragt)";
+             echo -e "${BLUE}INFO: API is reachable via the Dashboard (HTTPS + Auth) at https://${dashboard_domain}/api.${NC}";
+             echo "       Use curl manually with authentication, e.g.:";
+             echo "       ${BOLD}curl -u USERNAME https://${dashboard_domain}/api/http/routers | jq${NC}";
+             echo "       (Password will be prompted)";
         else
-             echo -e "${YELLOW}INFO: Dashboard Domain nicht gefunden. API ist wahrscheinlich nur über einen gesicherten Router erreichbar.${NC}";
-             echo "       -> Richten Sie einen Router für 'service: api@internal' ein oder aktivieren Sie 'api: {insecure: true}' (nicht empfohlen).";
+             echo -e "${YELLOW}INFO: Dashboard domain not found or could not be read.${NC}";
+             echo "       API is likely only reachable via a manually configured, secured router.";
+             echo "       -> Set up a router for 'service: api@internal' or enable";
+             echo "          'api: {insecure: true}' in ${STATIC_CONFIG_FILE} (not recommended for production).";
         fi
-        return 1;
+        return 1; # Return 1 because the active config couldn't be displayed automatically
     fi
     echo "=================================================="; return 0
 }
 
 #===============================================================================
-# Funktion: Traefik Health Check
+# Function: Traefik Health Check
 #===============================================================================
 health_check() {
     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Traefik Health Check${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi; if ! command -v curl &> /dev/null; then echo -e "${RED}FEHLER: 'curl' nicht gefunden.${NC}"; check_dependencies; if ! command -v curl &> /dev/null; then return 1; fi; fi
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi; if ! command -v curl &> /dev/null; then echo -e "${RED}ERROR: 'curl' not found.${NC}" >&2; check_dependencies; if ! command -v curl &> /dev/null; then return 1; fi; fi
 
     local all_ok=true
-    local port_check_output port_check_return_code static_check_output static_check_return_code insecure_api_output insecure_api_rc
+    local check_result=0 # Use a variable to track overall success/failure
 
-    echo "--- [1/5] Prüfe systemd Service Status ---"
-    if is_traefik_active; then echo -e " ${GREEN}OK:${NC} Traefik systemd Service (${TRAEFIK_SERVICE_NAME}) ist aktiv."; else echo -e " ${RED}FEHLER:${NC} Traefik systemd Service ist INAKTIV!"; all_ok=false; fi
+    echo "--- [1/5] Check systemd Service Status ---"
+    if is_traefik_active; then echo -e " ${GREEN}OK:${NC} Traefik systemd service (${TRAEFIK_SERVICE_NAME}) is active."; else echo -e " ${RED}ERROR:${NC} Traefik systemd service is INACTIVE!" >&2; all_ok=false; check_result=1; fi
     echo "--------------------------------------------"
 
-    echo "--- [2/5] Prüfe lauschende Ports (80/443) ---"
-    port_check_output=$(check_listening_ports 2>&1) # Fange auch stderr ab
-    port_check_return_code=$?
-    echo "$port_check_output"
-    if [ $port_check_return_code -ne 0 ]; then
-        all_ok=false
+    echo "--- [2/5] Check Listening Ports (80/443) ---"
+    # check_listening_ports prints its own output and errors
+    if ! check_listening_ports; then
+        all_ok=false; check_result=1;
     fi
-    echo "--------------------------------------------"
+    # check_listening_ports already prints the separator
 
-
-    echo "--- [3/5] Prüfe statische Konfiguration (YAML Syntax) ---"
-    static_check_output=$(check_static_config 2>&1) # Fange auch stderr ab
-    static_check_return_code=$?
+    echo "--- [3/5] Check Static Configuration (YAML Syntax) ---"
+    # check_static_config prints its own output and errors (yamllint)
+    # Note: check_static_config always returns 0, so we check its output for error messages
+    local static_check_output
+    static_check_output=$(check_static_config 2>&1)
     echo "$static_check_output"
-    if [ $static_check_return_code -ne 0 ]; then
-        all_ok=false
+    if echo "$static_check_output" | grep -q "${RED}ERROR:"; then
+         # A YAML syntax error is a significant problem
+         all_ok=false; check_result=1;
+    fi
+    # check_static_config already prints the separator
+
+    echo "--- [4/5] Check for Insecure API Configuration ---"
+    # check_insecure_api prints its own output and errors, returns 1 if insecure
+    if ! check_insecure_api; then
+        all_ok=false; check_result=1; # Insecure API is considered a health issue
+    fi
+    # check_insecure_api already prints the separator
+
+
+    echo "--- [5/5] Check Dashboard Reachability (if configured) ---"
+    local dashboard_domain=""; if [[ -f "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" ]]; then dashboard_domain=$(grep -oP 'Host\(\`\K[^`]*' "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" 2>/dev/null || true); fi
+    if [[ -z "$dashboard_domain" ]]; then echo -e " ${YELLOW}INFO:${NC} No Dashboard configuration found, check skipped."; else
+        echo "INFO: Checking reachability of https://${dashboard_domain}..."
+        # Use -k to allow self-signed/invalid certs for initial reachability check
+        local http_code; http_code=$(curl -kLI --connect-timeout 5 --max-time 10 "https://${dashboard_domain}" -s -o /dev/null -w "%{http_code}" 2>/dev/null); local curl_exit_code=$?;
+        if [[ $curl_exit_code -ne 0 ]]; then
+            echo -e " ${RED}- ERROR:${NC} Connection to https://${dashboard_domain} failed (Curl Code: ${curl_exit_code}). Network? DNS?"; all_ok=false; check_result=1;
+        elif [[ "$http_code" == "401" ]]; then
+            echo -e " ${GREEN}- OK:${NC}     Dashboard responds with 401 (Authentication required) - this is expected.";
+        elif [[ "$http_code" == "200" || "$http_code" == "403" ]]; then
+            echo -e " ${GREEN}- OK:${NC}     Dashboard responds (Status: ${http_code}).";
+        else
+            echo -e " ${RED}- ERROR:${NC} Unexpected HTTP Status: ${http_code}. Check logs!" >&2; all_ok=false; check_result=1;
+        fi
     fi
     echo "--------------------------------------------"
 
-    echo "--- [4/5] Prüfe auf unsichere API Konfiguration ---"
-    insecure_api_output=$(check_insecure_api 2>&1)
-    insecure_api_rc=$?
-    echo "$insecure_api_output"
-    if [[ $insecure_api_rc -ne 0 ]]; then
-        all_ok=false # Unsichere API gilt als Health-Problem
-    fi
-    echo "--------------------------------------------"
-
-
-    echo "--- [5/5] Prüfe Erreichbarkeit des Dashboards (falls konfiguriert) ---"
-    local dashboard_domain=""; if [[ -f "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" ]]; then dashboard_domain=$(grep -oP 'Host\(\`\K[^`]*' "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" || true); fi
-    if [[ -z "$dashboard_domain" ]]; then echo -e " ${YELLOW}INFO:${NC} Keine Dashboard-Konfiguration gefunden, Prüfung übersprungen."; else
-        echo "INFO: Prüfe Erreichbarkeit von https://${dashboard_domain}..."
-        local http_code; http_code=$(curl -kLI --connect-timeout 5 "https://${dashboard_domain}" -s -o /dev/null -w "%{http_code}"); local curl_exit_code=$?;
-        if [[ $curl_exit_code -ne 0 ]]; then echo -e " ${RED}- FEHLER:${NC} Verbindung zu https://${dashboard_domain} fehlgeschlagen (Curl Code: ${curl_exit_code})."; all_ok=false; elif [[ "$http_code" == "401" ]]; then echo -e " ${GREEN}- OK:${NC}     Dashboard antwortet mit 401 (Authentifizierung erforderlich) - das ist erwartet."; elif [[ "$http_code" == "200" || "$http_code" == "403" ]]; then echo -e " ${GREEN}- OK:${NC}     Dashboard antwortet (Status: ${http_code})."; else echo -e " ${RED}- FEHLER:${NC} Unerwarteter HTTP Status: ${http_code}. Logs prüfen!"; all_ok=false; fi
-    fi
-    echo "--------------------------------------------"
-
-    echo ""; echo "--- Gesamtergebnis Health Check ---";
-    if $all_ok; then echo -e "${GREEN}${BOLD}HEALTH CHECK BESTANDEN: Keine kritischen Fehler gefunden.${NC}"; else echo -e "${RED}${BOLD}HEALTH CHECK FEHLGESCHLAGEN: Mindestens ein Problem festgestellt!${NC}"; fi
-    echo "=================================================="; return $(if $all_ok; then echo 0; else echo 1; fi)
+    echo ""; echo "--- Overall Health Check Result ---";
+    if $all_ok; then echo -e "${GREEN}${BOLD}HEALTH CHECK PASSED: No critical errors found.${NC}"; else echo -e "${RED}${BOLD}HEALTH CHECK FAILED: At least one issue detected! See details above.${NC}" >&2; fi
+    echo "=================================================="; return $check_result
 }
 
 #===============================================================================
-# Funktion: Prüfe auf ablaufende Zertifikate
+# Function: Check Certificate Expiry
 #===============================================================================
 check_certificate_expiry() {
-    local days_threshold=${1:-14} # Standard: 14 Tage
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Zertifikatsablauf prüfen (Warnung < ${days_threshold} Tage)${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    local days_threshold=${1:-14} # Default: 14 days
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Check Certificate Expiry (Warning < ${days_threshold} days)${NC}"; echo -e "${MAGENTA}==================================================${NC}";
 
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    if ! command -v jq &> /dev/null || ! command -v openssl &> /dev/null || ! command -v date &> /dev/null; then echo -e "${RED}FEHLER: 'jq', 'openssl' und 'date' benötigt.${NC}"; check_dependencies; return 1; fi
-    if [[ ! -f "$ACME_TLS_FILE" ]]; then echo -e "${RED}FEHLER: ACME Speicherdatei (${ACME_TLS_FILE}) nicht gefunden.${NC}"; return 1; fi
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    if ! command -v jq &> /dev/null || ! command -v openssl &> /dev/null || ! command -v date &> /dev/null; then echo -e "${RED}ERROR: 'jq', 'openssl', and 'date' required.${NC}" >&2; check_dependencies; return 1; fi
+    if [[ ! -f "$ACME_TLS_FILE" ]]; then echo -e "${RED}ERROR: ACME storage file (${ACME_TLS_FILE}) not found.${NC}" >&2; return 1; fi
 
     local threshold_seconds=$(( days_threshold * 24 * 60 * 60 ))
     local current_epoch=$(date +%s)
     local warning_found=false
+    local error_occurred=false
 
-    echo -e "${BLUE}INFO: Lese Zertifikate aus ${ACME_TLS_FILE}...${NC}";
+    echo -e "${BLUE}INFO: Reading certificates from ${ACME_TLS_FILE}...${NC}";
     local resolver_key; resolver_key=$(sudo jq -r 'keys | .[0]' "${ACME_TLS_FILE}" 2>/dev/null);
-    if [[ -z "$resolver_key" ]]; then echo -e "${RED}FEHLER: Konnte keinen ACME-Resolver-Schlüssel finden.${NC}"; return 1; fi
-
+    if [[ -z "$resolver_key" || "$resolver_key" == "null" ]]; then echo -e "${RED}ERROR: Could not find ACME resolver key or file is empty/invalid.${NC}" >&2; return 1; fi;
+    echo -e "${BLUE}Using data for resolver: ${resolver_key}${NC}"
     local cert_count; cert_count=$(sudo jq --arg key "$resolver_key" '.[$key].Certificates | length' "${ACME_TLS_FILE}" 2>/dev/null);
-    if [[ -z "$cert_count" || "$cert_count" -eq 0 ]]; then echo -e "${YELLOW}Keine Zertifikate für Resolver '${resolver_key}' gefunden.${NC}"; return 0; fi
+    if [[ -z "$cert_count" || "$cert_count" == "null" ]]; then cert_count=0; fi;
+    if [[ "$cert_count" -eq 0 ]]; then echo -e "${YELLOW}No certificates found for resolver '${resolver_key}'.${NC}"; return 0; fi
 
-    echo "Prüfe ${cert_count} Zertifikate:"
+    echo "Checking ${cert_count} certificates:"
     for (( i=0; i<cert_count; i++ )); do
-        local main_domain cert_base64 end_date_str end_date_epoch diff_seconds days_left cert_pem cert_info
-        main_domain=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].domain.main // "N/A"' "${ACME_TLS_FILE}")
-        cert_base64=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].certificate // empty' "${ACME_TLS_FILE}")
+        # echo -e "${CYAN}--- Certificate $((i+1)) ---${NC}"; # Less verbose
+        local main_domain sans cert_base64;
+        main_domain=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].domain.main // "N/A"' "${ACME_TLS_FILE}" 2>/dev/null)
+        sans=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].domain.sans | if . then map(" - " + .) | join("\n") else empty end' "${ACME_TLS_FILE}" 2>/dev/null)
+        cert_base64=$(sudo jq -r --arg key "$resolver_key" --argjson idx "$i" '.[$key].Certificates[$idx].certificate // empty' "${ACME_TLS_FILE}" 2>/dev/null)
+
+        # echo -e "  ${BOLD}Main Domain:${NC} ${main_domain:-N/A}"; # Less verbose
+        # if [[ -n "$sans" ]]; then echo -e "  ${BOLD}Alternatives:${NC}\n${sans}"; fi # Less verbose
 
         if [[ -n "$cert_base64" ]]; then
-            cert_pem=$(echo "$cert_base64" | base64 -d)
+            local end_date issuer subject cert_info cert_pem;
+            cert_pem=$(echo "$cert_base64" | base64 -d 2>/dev/null);
             if [[ -n "$cert_pem" ]]; then
-                 # Extrahiere nur das Ablaufdatum
+                 # Extract only the expiry date
                  end_date_str=$(echo "$cert_pem" | openssl x509 -noout -enddate 2>/dev/null | sed 's/notAfter=//')
                  if [[ $? -eq 0 && -n "$end_date_str" ]]; then
-                    # Konvertiere Ablaufdatum in Epoche (Sekunden seit 1970)
-                    # Beachte: Das Datumsformat von openssl kann variieren! Passt für 'MMM DD HH:MM:SS YYYY GMT'
-                    end_date_epoch=$(date --date="$end_date_str" +%s 2>/dev/null)
+                    # Convert expiry date to epoch (seconds since 1970)
+                    # Note: Date format from openssl can vary! Assumes 'MMM DD HH:MM:SS YYYY GMT' or similar parseable format
+                    # Use 'date -d' which is more flexible than 'date -f'
+                    end_date_epoch=$(date -d "$end_date_str" +%s 2>/dev/null)
                     if [[ $? -eq 0 ]]; then
                         diff_seconds=$(( end_date_epoch - current_epoch ))
                         days_left=$(( diff_seconds / 86400 )) # 86400 = 24*60*60
 
                         if [[ "$diff_seconds" -lt 0 ]]; then
-                            echo -e " ${RED}- ${main_domain}: ABGELAUFEN seit $((-days_left)) Tagen! (${end_date_str})${NC}"
+                            echo -e " ${RED}- ${main_domain}: EXPIRED ${BOLD}$((-days_left))${NC}${RED} days ago! (${end_date_str})${NC}" >&2
                             warning_found=true
+                            error_occurred=true # Expired is an error state
                         elif [[ "$diff_seconds" -lt "$threshold_seconds" ]]; then
-                            echo -e " ${YELLOW}- ${main_domain}: Läuft in ${days_left} Tagen ab! (${end_date_str})${NC}"
+                            echo -e " ${YELLOW}- ${main_domain}: Expires in ${BOLD}${days_left}${NC}${YELLOW} days! (${end_date_str})${NC}"
                             warning_found=true
                         else
-                             # Optional: Info für gültige Zertifikate anzeigen
-                             # echo -e " ${GREEN}- ${main_domain}: Gültig für ${days_left} Tage (${end_date_str})${NC}"
-                             : # Mache nichts, wenn noch lange gültig
+                             # Optional: Info for valid certificates
+                              echo -e " ${GREEN}- ${main_domain}: Valid for ${days_left} days (${end_date_str})${NC}"
+                             # : # Do nothing if still valid for a long time
                         fi
                     else
-                         echo -e " ${YELLOW}- ${main_domain}: Konnte Ablaufdatum nicht parsen: ${end_date_str}${NC}"
+                         echo -e " ${YELLOW}- ${main_domain}: Could not parse expiry date '${end_date_str}'.${NC}" >&2
+                         error_occurred=true
                     fi
                  else
-                     echo -e " ${YELLOW}- ${main_domain}: Konnte Ablaufdatum nicht aus Zertifikat extrahieren.${NC}"
+                     echo -e " ${YELLOW}- ${main_domain}: Could not extract expiry date from certificate.${NC}" >&2
+                     error_occurred=true
                  fi
             else
-                 echo -e " ${YELLOW}- ${main_domain}: Konnte Zertifikat nicht dekodieren.${NC}"
+                 echo -e " ${YELLOW}- ${main_domain}: Could not decode certificate.${NC}" >&2
+                 error_occurred=true
             fi
         else
-             echo -e " ${YELLOW}- ${main_domain}: Keine Zertifikatsdaten im JSON.${NC}"
+             echo -e " ${YELLOW}- ${main_domain}: No certificate data found in JSON.${NC}";
         fi
     done
 
     echo "--------------------------------------------------"
-    if ! $warning_found; then
-        echo -e "${GREEN}Keine Zertifikate gefunden, die in weniger als ${days_threshold} Tagen ablaufen oder bereits abgelaufen sind.${NC}"
+    if $error_occurred; then
+        echo -e "${RED}Errors occurred during check or expired certificates were found!${NC}" >&2
+        return 1
+    elif $warning_found; then
+         echo -e "${YELLOW}Warning: At least one certificate requires attention!${NC}"
+         return 0 # Return 0 for warnings, 1 for errors/expired
     else
-         echo -e "${YELLOW}Achtung: Mindestens ein Zertifikat erfordert Aufmerksamkeit!${NC}"
+        echo -e "${GREEN}No certificates found expiring in less than ${days_threshold} days or already expired.${NC}"
+        return 0
     fi
-    echo "=================================================="
-    return 0
 }
 
 #===============================================================================
-# Funktion: Prüfe auf neue Traefik Versionen
+# Function: Check for New Traefik Versions
 #===============================================================================
 check_traefik_updates() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Auf neue Traefik Version prüfen${NC}"; echo -e "${MAGENTA}==================================================${NC}";
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    if ! command -v jq &> /dev/null || ! command -v curl &> /dev/null; then echo -e "${RED}FEHLER: 'jq' und 'curl' benötigt.${NC}"; check_dependencies; return 1; fi
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Check for New Traefik Version${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    if ! command -v jq &> /dev/null || ! command -v curl &> /dev/null; then echo -e "${RED}ERROR: 'jq' and 'curl' required.${NC}" >&2; check_dependencies; return 1; fi
 
     local current_version_tag installed_version
-    installed_version=$("${TRAEFIK_BINARY_PATH}" version | grep -i Version | awk '{print $2}') # Hole z.B. v3.0.0
-    # Manchmal fehlt das 'v' in der Ausgabe, füge es hinzu falls nötig für Konsistenz
+    installed_version=$("${TRAEFIK_BINARY_PATH}" version 2>/dev/null | grep -i Version | awk '{print $2}') # Get e.g. v3.0.0
+    # Sometimes the 'v' is missing in the output, add it if necessary for consistency
     if [[ ! "$installed_version" =~ ^v ]]; then
         current_version_tag="v${installed_version}"
     else
          current_version_tag="${installed_version}"
     fi
-    current_version=$(echo "$current_version_tag" | sed 's/^v//') # Entferne 'v' für Vergleich
+    current_version=$(echo "$current_version_tag" | sed 's/^v//') # Remove 'v' for comparison
 
-    echo -e "${BLUE}Aktuell installierte Version: ${current_version_tag}${NC}"
-    echo "Prüfe neueste Version von ${GITHUB_REPO} auf GitHub..."
+    echo -e "${BLUE}Currently installed version: ${current_version_tag}${NC}"
+    echo "Checking latest version from ${GITHUB_REPO} on GitHub..."
 
-    local latest_version_tag latest_version release_url release_notes
-    # Hole neueste Release-Info von GitHub API
+    local latest_version_tag latest_version release_url # release_notes removed
+    # Get latest Release Info from GitHub API
     local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local response
-    response=$(curl -sfL "${api_url}")
+    response=$(curl -sfL "${api_url}" 2>/dev/null)
     local curl_exit_code=$?
 
     if [[ $curl_exit_code -ne 0 ]]; then
-        echo -e "${RED}FEHLER: Konnte GitHub API nicht abfragen (Curl Code: $curl_exit_code). Netzwerkproblem? Rate Limit?${NC}"
+        echo -e "${RED}ERROR: Could not query GitHub API (Curl Code: $curl_exit_code). Network problem? Rate limit?${NC}" >&2
         return 1
     fi
 
     latest_version_tag=$(echo "$response" | jq -r '.tag_name // empty')
     latest_version=$(echo "$latest_version_tag" | sed 's/^v//')
     release_url=$(echo "$response" | jq -r '.html_url // empty')
-    # release_notes=$(echo "$response" | jq -r '.body // empty' | head -n 10) # Erste 10 Zeilen der Notes
+    # release_notes=$(echo "$response" | jq -r '.body // empty' | head -n 10) # First 10 lines of notes
 
-    if [[ -z "$latest_version_tag" || -z "$latest_version" ]]; then
-        echo -e "${RED}FEHLER: Konnte neueste Version nicht von GitHub API ermitteln.${NC}"
-        echo "API Response: $response" # Zur Fehlersuche
+    if [[ -z "$latest_version_tag" || "$latest_version_tag" == "null" ]]; then
+        echo -e "${RED}ERROR: Could not determine latest version from GitHub API.${NC}" >&2
+        # echo "API Response: $response" # For debugging
         return 1
     fi
 
-    echo "Neueste verfügbare Version: ${latest_version_tag}"
+    echo "Latest available version: ${latest_version_tag}"
     echo "--------------------------------------------------"
 
-    # Verwende sort -V für robusten Versionsvergleich
+    # Use sort -V for robust version comparison
     if [[ "$current_version" == "$latest_version" ]]; then
-        echo -e "${GREEN}Traefik ist auf dem neuesten Stand.${NC}"
+        echo -e "${GREEN}Traefik is up to date.${NC}"
     elif printf '%s\n%s\n' "$current_version" "$latest_version" | sort -V | head -n 1 | grep -q "^${current_version}$"; then
-         # Current version ist kleiner als latest version
-        echo -e "${YELLOW}NEUE VERSION VERFÜGBAR: ${latest_version_tag}${NC}"
+         # Current version is smaller than latest version
+        echo -e "${YELLOW}NEW VERSION AVAILABLE: ${latest_version_tag}${NC}"
         echo "Release Info: ${release_url}"
-        # echo -e "\nErste Zeilen der Release Notes:\n${release_notes}\n..."
-        echo -e "${CYAN}Update über Menü 8 -> 2 möglich.${NC}" # Menüpunkt angepasst
+        # echo -e "\nFirst lines of Release Notes:\n${release_notes}\n..."
+        echo -e "${CYAN}Update possible via Menu 8 -> 2.${NC}" # Menu item adjusted
     else
-         # Aktuelle Version ist neuer als 'latest' (z.B. Entwicklerversion)?
-         echo -e "${YELLOW}Installierte Version (${current_version_tag}) scheint neuer zu sein als das letzte stabile Release (${latest_version_tag}).${NC}"
+         # Current version is newer than 'latest' (e.g., developer version)?
+         echo -e "${YELLOW}Installed version (${current_version_tag}) seems newer than the latest stable release (${latest_version_tag}).${NC}"
     fi
 
     echo "=================================================="
@@ -1211,132 +1874,134 @@ check_traefik_updates() {
 }
 
 #===============================================================================
-# Funktion: Traefik Binary aktualisieren (Interaktiv)
+# Function: Update Traefik Binary (Interactive)
 #===============================================================================
 update_traefik_binary() {
-    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Traefik Binary aktualisieren${NC}"; echo -e "${MAGENTA}==================================================${NC}";
-    if ! is_traefik_installed; then echo -e "${RED}FEHLER: Traefik nicht installiert.${NC}"; return 1; fi
-    if ! command -v jq &> /dev/null || ! command -v curl &> /dev/null || ! command -v tar &> /dev/null; then echo -e "${RED}FEHLER: 'jq', 'curl', 'tar' benötigt.${NC}"; check_dependencies; return 1; fi
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Update Traefik Binary${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    if ! command -v jq &> /dev/null || ! command -v curl &> /dev/null || ! command -v tar &> /dev/null; then echo -e "${RED}ERROR: 'jq', 'curl', 'tar' required.${NC}" >&2; check_dependencies; return 1; fi
 
     local current_version_tag installed_version
-    installed_version=$("${TRAEFIK_BINARY_PATH}" version | grep -i Version | awk '{print $2}') # Hole z.B. v3.0.0
+    installed_version=$("${TRAEFIK_BINARY_PATH}" version 2>/dev/null | grep -i Version | awk '{print $2}') # Get e.g. v3.0.0
      if [[ ! "$installed_version" =~ ^v ]]; then current_version_tag="v${installed_version}"; else current_version_tag="${installed_version}"; fi
 
-    echo -e "${BLUE}Aktuell installierte Version: ${current_version_tag}${NC}"
+    echo -e "${BLUE}Currently installed version: ${current_version_tag}${NC}"
 
-    # Ermittle neueste Version
+    # Determine latest version
     local latest_version_tag latest_version
-    echo "Ermittle neueste Version von GitHub..."
-    latest_version_tag=$(curl -sfL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | jq -r '.tag_name // empty')
+    echo "Determining latest version from GitHub..."
+    latest_version_tag=$(curl -sfL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty')
 
-    if [[ -z "$latest_version_tag" ]]; then
-        echo -e "${YELLOW}WARNUNG: Konnte neueste Version nicht automatisch ermitteln.${NC}"
+    if [[ -z "$latest_version_tag" || "$latest_version_tag" == "null" ]]; then
+        echo -e "${YELLOW}WARNING: Could not determine latest version automatically.${NC}" >&2
         latest_version_tag="N/A"
     else
-         echo "Neueste Version gefunden: ${latest_version_tag}"
+         echo "Latest version found: ${latest_version_tag}"
     fi
 
     local target_version
-    read -p "Zu installierende Version eingeben [Standard: ${latest_version_tag}]: " target_version
-    # Standardwert setzen, auch wenn N/A ermittelt wurde
+    read -p "Version to install [Default: ${latest_version_tag}]: " target_version
+    # Set default value, even if N/A was determined
     if [[ -z "$target_version" ]] && [[ "$latest_version_tag" != "N/A" ]]; then
         target_version="$latest_version_tag"
     elif [[ -z "$target_version" ]] && [[ "$latest_version_tag" == "N/A" ]]; then
-         echo -e "${RED}FEHLER: Keine Zielversion angegeben und konnte keine neueste Version ermitteln.${NC}"; return 1;
+         echo -e "${RED}ERROR: No target version specified and could not determine latest version.${NC}" >&2; return 1;
     fi
-    # Stelle sicher, dass 'v' am Anfang ist für Konsistenz
+    # Ensure 'v' is at the beginning for consistency
     if [[ ! "$target_version" =~ ^v ]]; then target_version="v${target_version}"; fi
 
     if [[ "$target_version" == "$current_version_tag" ]]; then
-        echo -e "${YELLOW}INFO: Zielversion ${target_version} ist bereits installiert.${NC}"; return 0;
+        echo -e "${YELLOW}INFO: Target version ${target_version} is already installed.${NC}"; return 0;
     fi
 
     echo "--------------------------------------------------"
-    echo -e "Aktualisierung von ${BOLD}${current_version_tag}${NC} auf ${BOLD}${target_version}${NC} wird vorbereitet."
+    echo -e "Update from ${BOLD}${current_version_tag}${NC} to ${BOLD}${target_version}${NC} is being prepared."
     local confirm_update=false
-    ask_confirmation "Sind Sie sicher, dass Sie die Traefik Binary aktualisieren möchten?" confirm_update
-    if ! $confirm_update; then echo "Abbruch."; return 1; fi
+    ask_confirmation "Are you sure you want to update the Traefik binary? (Stops Traefik briefly)" confirm_update
+    if ! $confirm_update; then echo "Aborting."; return 1; fi
 
-    local ARCH=$(dpkg --print-architecture); TARGET_ARCH="amd64";
+    local ARCH=$(dpkg --print-architecture); local TARGET_ARCH="amd64";
     if [[ "$ARCH" != "$TARGET_ARCH" ]]; then
-         echo -e "${YELLOW}WARNUNG: Architektur (${ARCH}) weicht von 'amd64' ab. Download könnte fehlschlagen.${NC}";
-         local confirm_arch=false; ask_confirmation "Trotzdem versuchen?" confirm_arch; if ! $confirm_arch; then return 1; fi
+         echo -e "${YELLOW}WARNING: Architecture (${ARCH}) differs from 'amd64'. Download might fail.${NC}" >&2;
+         local confirm_arch=false; ask_confirmation "Continue anyway?" confirm_arch; if ! $confirm_arch; then return 1; fi
     fi
 
     local DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${target_version}/traefik_${target_version}_linux_${TARGET_ARCH}.tar.gz"
     local TAR_FILE="/tmp/traefik_${target_version}_linux_${TARGET_ARCH}.tar.gz"
-    local TEMP_EXTRACT_DIR="/tmp/traefik_update_extract"
+    local TEMP_EXTRACT_DIR="/tmp/traefik_update_extract_$(date +%s)"
 
-    echo "Lade ${target_version} von ${DOWNLOAD_URL}..."
+    echo "Downloading ${target_version} from ${DOWNLOAD_URL}..."
     rm -f "$TAR_FILE"
     if ! curl -sfL -o "$TAR_FILE" "$DOWNLOAD_URL"; then
-        echo -e "${RED}FEHLER: Download fehlgeschlagen (URL: ${DOWNLOAD_URL}). Version prüfen!${NC}"; return 1;
+        echo -e "${RED}ERROR: Download failed (URL: ${DOWNLOAD_URL}). Check version!${NC}" >&2; return 1;
     fi
-    echo -e "${GREEN}Download erfolgreich.${NC}"
+    echo -e "${GREEN}Download successful.${NC}"
 
-    echo "Entpacke Binary nach ${TEMP_EXTRACT_DIR}..."
+    echo "Extracting binary to ${TEMP_EXTRACT_DIR}..."
     rm -rf "${TEMP_EXTRACT_DIR}"
-    mkdir -p "${TEMP_EXTRACT_DIR}"
-    # Entpacke nur die 'traefik' Datei, ignoriere Rest (LICENSE, README)
+    if ! mkdir -p "${TEMP_EXTRACT_DIR}"; then echo -e "${RED}ERROR: Could not create temporary extraction directory.${NC}" >&2; rm -f "$TAR_FILE"; return 1; fi
+    # Extract only the 'traefik' file, ignore others (LICENSE, README)
     if ! tar xzvf "$TAR_FILE" -C "${TEMP_EXTRACT_DIR}/" --strip-components=0 "traefik"; then
-         echo -e "${RED}FEHLER: Konnte 'traefik' Binary nicht aus ${TAR_FILE} extrahieren.${NC}"; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
+         echo -e "${RED}ERROR: Could not extract 'traefik' binary from ${TAR_FILE}.${NC}" >&2; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
     fi
     local new_binary_path="${TEMP_EXTRACT_DIR}/traefik"
     if [[ ! -f "$new_binary_path" ]]; then
-         echo -e "${RED}FEHLER: Extrahierte Binary '${new_binary_path}' nicht gefunden.${NC}"; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
+         echo -e "${RED}ERROR: Extracted binary '${new_binary_path}' not found.${NC}" >&2; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
     fi
-    echo -e "${GREEN}Entpacken erfolgreich.${NC}"
+    echo -e "${GREEN}Extraction successful.${NC}"
 
-    echo "Stoppe Traefik Service..."
+    echo "Stopping Traefik service..."
     if ! sudo systemctl stop "${TRAEFIK_SERVICE_NAME}"; then
-        echo -e "${RED}FEHLER: Konnte Traefik Service nicht stoppen. Update abgebrochen.${NC}"; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
+        echo -e "${RED}ERROR: Could not stop Traefik service. Update aborted.${NC}" >&2; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
     fi
-    sleep 1 # Kurz warten
+    sleep 1 # Wait briefly
 
-    local backup_binary_path="${TRAEFIK_BINARY_PATH}_${current_version_tag}_$(date +%F_%T).bak"
-    echo "Erstelle Backup der alten Binary nach ${backup_binary_path}..."
+    local backup_binary_path="${TRAEFIK_BINARY_PATH}_${current_version_tag}_$(date +%Y%m%d_%H%M%S).bak" # More precise timestamp for backup
+    echo "Creating backup of old binary to ${backup_binary_path}..."
     if ! sudo cp "${TRAEFIK_BINARY_PATH}" "${backup_binary_path}"; then
-         echo -e "${RED}FEHLER: Konnte Backup der alten Binary nicht erstellen. Update abgebrochen.${NC}"; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; sudo systemctl start "${TRAEFIK_SERVICE_NAME}"; return 1;
+         echo -e "${RED}ERROR: Could not create backup of old binary. Update aborted.${NC}" >&2; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; sudo systemctl start "${TRAEFIK_SERVICE_NAME}" 2>/dev/null || true; return 1; # Try starting old service
     fi
-    echo -e "${GREEN}Backup erfolgreich.${NC}"
+    echo -e "${GREEN}Backup successful.${NC}"
 
-    echo "Ersetze alte Binary mit neuer Version..."
+    echo "Replacing old binary with new version..."
     if ! sudo mv "${new_binary_path}" "${TRAEFIK_BINARY_PATH}"; then
-        echo -e "${RED}FEHLER: Konnte neue Binary nicht nach ${TRAEFIK_BINARY_PATH} verschieben.${NC}" >&2
-        echo -e "${YELLOW}Versuche Backup wiederherzustellen...${NC}" >&2
-        sudo mv "${backup_binary_path}" "${TRAEFIK_BINARY_PATH}" || echo -e "${RED}KRITISCH: Konnte Backup NICHT wiederherstellen!${NC}" >&2
-        sudo systemctl start "${TRAEFIK_SERVICE_NAME}"; rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
+        echo -e "${RED}ERROR: Could not move new binary to ${TRAEFIK_BINARY_PATH}.${NC}" >&2
+        echo -e "${YELLOW}Attempting to restore backup...${NC}" >&2
+        sudo mv "${backup_binary_path}" "${TRAEFIK_BINARY_PATH}" || echo -e "${RED}CRITICAL: Could NOT restore backup!${NC}" >&2
+        sudo systemctl start "${TRAEFIK_SERVICE_NAME}" 2>/dev/null || true # Try starting old service
+        rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
     fi
-    sudo chmod +x "${TRAEFIK_BINARY_PATH}"
-    echo -e "${GREEN}Binary ersetzt.${NC}"
+    if ! sudo chmod +x "${TRAEFIK_BINARY_PATH}"; then echo -e "${YELLOW}WARNING: Could not set execute permissions for new binary.${NC}" >&2; fi # Warning
+    echo -e "${GREEN}Binary replaced.${NC}"
 
-    echo "Starte Traefik Service neu..."
+    echo "Starting Traefik service..."
     if ! sudo systemctl start "${TRAEFIK_SERVICE_NAME}"; then
-         echo -e "${RED}FEHLER: Konnte Traefik Service mit neuer Version nicht starten!${NC}" >&2
-         echo -e "${YELLOW}Versuche Backup wiederherzustellen...${NC}" >&2
-         sudo mv "${backup_binary_path}" "${TRAEFIK_BINARY_PATH}" || echo -e "${RED}KRITISCH: Konnte Backup NICHT wiederherstellen!${NC}" >&2
-         sudo systemctl start "${TRAEFIK_SERVICE_NAME}"
+         echo -e "${RED}ERROR: Could not start Traefik service with new version!${NC}" >&2
+         echo -e "${YELLOW}Check the logs ('sudo journalctl -u ${TRAEFIK_SERVICE_NAME} -l').${NC}" >&2
+         echo -e "${YELLOW}Attempting to restore backup...${NC}" >&2
+         sudo mv "${backup_binary_path}" "${TRAEFIK_BINARY_PATH}" || echo -e "${RED}CRITICAL: Could NOT restore backup!${NC}" >&2
+         sudo systemctl start "${TRAEFIK_SERVICE_NAME}" 2>/dev/null || true # Try starting old service
          rm -f "$TAR_FILE"; rm -rf "${TEMP_EXTRACT_DIR}"; return 1;
     fi
-    sleep 2 # Warten bis gestartet
+    sleep 2 # Wait until started
 
-    echo "Prüfe neue Version..."
+    echo "Checking new version..."
     local final_version_tag final_installed_version
-    final_installed_version=$("${TRAEFIK_BINARY_PATH}" version | grep -i Version | awk '{print $2}')
+    final_installed_version=$("${TRAEFIK_BINARY_PATH}" version 2>/dev/null | grep -i Version | awk '{print $2}')
     if [[ ! "$final_installed_version" =~ ^v ]]; then final_version_tag="v${final_installed_version}"; else final_version_tag="${final_installed_version}"; fi
 
     if [[ "$final_version_tag" == "$target_version" ]]; then
-        echo -e "${GREEN}${BOLD}Update auf Version ${final_version_tag} erfolgreich abgeschlossen!${NC}"
-        # Optional: Erfolgreiches Backup löschen? Eher nicht, zur Sicherheit behalten.
-        echo "Altes Backup: ${backup_binary_path}"
+        echo -e "${GREEN}${BOLD}Update to version ${final_version_tag} completed successfully!${NC}"
+        # Optional: Successful backup could be kept or removed. Keeping for safety.
+        echo "Old backup: ${backup_binary_path}"
     else
-        echo -e "${RED}FEHLER: Update fehlgeschlagen. Installierte Version ist ${final_version_tag}, erwartet wurde ${target_version}.${NC}" >&2
-        echo -e "${YELLOW}Prüfen Sie den Service Status und die Logs.${NC}" >&2
-        echo -e "${YELLOW}Backup der vorherigen Version: ${backup_binary_path}${NC}" >&2
+        echo -e "${RED}ERROR: Update failed. Installed version is ${final_version_tag}, expected ${target_version}.${NC}" >&2
+        echo -e "${YELLOW}Check the service status and logs.${NC}" >&2
+        echo -e "${YELLOW}Backup of previous version: ${backup_binary_path}${NC}" >&2
         return 1
     fi
 
-    echo "Bereinige temporäre Dateien..."
+    echo "Cleaning up temporary files..."
     rm -f "$TAR_FILE"
     rm -rf "${TEMP_EXTRACT_DIR}"
     echo "=================================================="
@@ -1344,160 +2009,186 @@ update_traefik_binary() {
 }
 
 #===============================================================================
-# Funktion: Prüfe auf unsichere API Konfiguration
+# Function: Check for Insecure API Configuration
 #===============================================================================
 check_insecure_api() {
-     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Prüfe auf unsichere API Konfiguration${NC}"; echo -e "${MAGENTA}==================================================${NC}";
-     if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}FEHLER: Statische Konfig nicht gefunden.${NC}"; return 1; fi
+     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Check for Insecure API Configuration${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+     if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}ERROR: Static config not found.${NC}" >&2; return 1; fi
 
-     # Suche nach 'insecure: true' innerhalb des 'api:' Blocks
-     if awk '/^api:/ {flag=1; next} /^[a-zA-Z#]+:/ {if (!/^\s*#/) flag=0} flag && /^\s*insecure:\s*true/' "${STATIC_CONFIG_FILE}" | grep -q 'true'; then
-         echo -e "${RED}WARNUNG: Unsichere API ist aktiviert! (api.insecure: true in ${STATIC_CONFIG_FILE})${NC}"
-         echo -e "${RED}         Dies erlaubt unauthentifizierten Zugriff auf die Traefik API über den 'traefik' EntryPoint (oft Port 8080).${NC}"
-         echo -e "${RED}         Es wird dringend empfohlen, dies auf 'false' zu setzen und die API über einen gesicherten Router (wie das Dashboard) bereitzustellen.${NC}"
-         return 1 # Gibt Fehler zurück, um im Health Check als Problem zu gelten
+     # Search for 'insecure: true' within the 'api:' block, ignoring comments
+     if sudo awk '/^api:/ {flag=1; next} /^[a-zA-Z#]+:/ {if (!/^\s*#/) flag=0} flag && /^\s*insecure:\s*true/' "${STATIC_CONFIG_FILE}" 2>/dev/null | grep -q 'true'; then
+         echo -e "${RED}WARNING: Insecure API is enabled! (api.insecure: true in ${STATIC_CONFIG_FILE})${NC}" >&2
+         echo -e "${RED}         This allows unauthenticated access to the Traefik API via the 'traefik' EntryPoint (often port 8080).${NC}" >&2
+         echo -e "${RED}         It is strongly recommended to set this to 'false' and expose the API via a secured router (like the dashboard).${NC}" >&2
+         return 1 # Return error to be considered a problem in Health Check
      else
-         echo -e "${GREEN}INFO: API scheint sicher konfiguriert zu sein (api.insecure: false oder nicht gesetzt).${NC}"
+         echo -e "${GREEN}INFO: API seems securely configured (api.insecure: false or not set).${NC}"
      fi
      echo "=================================================="
      return 0
 }
 
 
-# --- HAUPTMENÜ LOGIK ---
-# (Muss nach allen Funktionsdefinitionen stehen)
+# --- MAIN MENU LOGIC ---
+# (Must be after all function definitions)
 
-# Führe nicht-interaktiven Backup aus, falls angefordert (jetzt wo Funktion definiert ist)
-# Stelle sicher, dass backup_traefik definiert ist, bevor es aufgerufen wird
+# Execute non-interactive backup if requested (now that function is defined)
+# Ensure backup_traefik is defined before calling it
 if $non_interactive_mode && [[ "$1" == "--run-backup" ]]; then
+    # Check if the function exists
     if declare -F backup_traefik > /dev/null; then
-        run_non_interactive_backup() {
-             echo "[$(date +'%Y-%m-%d %H:%M:%S')] Running non-interactive backup..."
-             backup_traefik true # Ruft die Funktion auf
-             local exit_code=$?
-             echo "[$(date +'%Y-%m-%d %H:%M:%S')] Non-interactive backup finished with exit code ${exit_code}."
-             exit $exit_code
-        }
-        run_non_interactive_backup
+        # Execute the non-interactive backup and exit
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Running non-interactive backup via ${SCRIPT_PATH}..."
+        backup_traefik true # Call the function with non-interactive flag
+        local exit_code=$?
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Non-interactive backup finished with exit code ${exit_code}."
+        exit $exit_code
     else
-         echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: backup_traefik function not defined when needed for non-interactive mode." >&2
+         # Should not happen with correct function ordering, but as a safeguard
+         echo "[$(date +'%Y-%m-%d %H:%M:%S')] CRITICAL ERROR: backup_traefik function not defined when needed for non-interactive mode." >&2
          exit 1
     fi
 fi
 
-# Nur im interaktiven Modus Menü anzeigen
+# Only show menu in interactive mode
 if ! $non_interactive_mode; then
     check_root
-    check_dependencies # Prüfe Tools direkt am Anfang
+    check_dependencies # Check tools directly at the beginning
 
     while true; do
-        print_header "Hauptmenü - Traefik Verwaltung"
+        print_header "Main Menu - Traefik Management"
 
-        # Menüpunkte - Neu nummeriert nach Entfernung von Git
-        echo -e "| ${CYAN}1) Installation & Update           ${NC} |"
-        echo -e "| ${CYAN}2) Konfiguration & Routen          ${NC} |"
-        echo -e "| ${CYAN}3) Sicherheit & Zertifikate        ${NC} |"
-        echo -e "| ${CYAN}4) Dienst & Logs                   ${NC} |"
+        # Menu items - Renumbered after removing Git
+        echo -e "| ${CYAN}1) Installation & Initial Setup    ${NC} |"
+        echo -e "| ${CYAN}2) Configuration & Routes          ${NC} |"
+        echo -e "| ${CYAN}3) Security & Certificates         ${NC} |"
+        echo -e "| ${CYAN}4) Service & Logs                  ${NC} |"
         echo -e "| ${CYAN}5) Backup & Restore                ${NC} |"
-        echo -e "| ${CYAN}6) Diagnose & Info                 ${NC} |"
-        echo -e "| ${CYAN}7) Automatisierung                 ${NC} |"
-        echo -e "| ${CYAN}8) Wartung & Updates               ${NC} |" # Ehemals 9
+        echo -e "| ${CYAN}6) Diagnostics & Info              ${NC} |"
+        echo -e "| ${CYAN}7) Automation                      ${NC} |"
+        echo -e "| ${CYAN}8) Maintenance & Updates           ${NC} |"
         echo "|-----------------------------------------|"
-        echo -e "| ${BOLD}0) Skript beenden                  ${NC} |"
+        echo -e "| ${BOLD}9) Uninstall Traefik ${RED}(RISK!)      ${NC} |" # Uninstall moved to top level
+        echo "|-----------------------------------------|"
+        echo -e "| ${BOLD}0) Exit Script                     ${NC} |"
         echo "+-----------------------------------------+";
-        read -p "Ihre Auswahl [0-8]: " main_choice # Bereich angepasst
+        read -p "Your choice [0-9]: " main_choice # Range adjusted
 
-        sub_choice=-1 # Reset sub_choice
+        local sub_choice=-1 # Reset sub_choice
 
-        case $main_choice in
+        case "$main_choice" in # Quote main_choice
             1) # --- Install / Update Submenu ---
-                clear; print_header "Installation / Update";
-                echo " 1) Traefik installieren / überschreiben";
-                echo " 2) Traefik DEINSTALLIEREN ${RED}(RISIKO!)${NC}";
-                echo " 0) Zurück"; echo "-----------------------------------"; read -p "Auswahl [0-2]: " sub_choice
-                case $sub_choice in 1) install_traefik ;; 2) uninstall_traefik ;; 0) ;; *) echo -e "${RED}Ungültige Auswahl.${NC}" ;; esac ;;
+                clear; print_header "Installation & Initial Setup";
+                echo " 1) Install / Overwrite Traefik";
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-1]: " sub_choice
+                case "$sub_choice" in 1) install_traefik ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             2) # --- Config & Routes Submenu ---
-                clear; print_header "Konfiguration & Routen"; echo " 1) Neuen Service / Route hinzufügen"; echo " 2) Service / Route ändern"; echo " 3) Service / Route entfernen"; echo " 4) Statische Konfig prüfen (Hinweis V3)"; echo " 5) Statische Konfig bearbeiten"; echo " 6) Middleware Konfig bearbeiten"; echo " 7) EntryPoints bearbeiten"; echo " 8) Globale TLS-Optionen bearbeiten"; echo " 0) Zurück"; echo "-----------------------------------"; read -p "Auswahl [0-8]: " sub_choice
-                case $sub_choice in 1) add_service ;; 2) modify_service ;; 3) remove_service ;; 4) check_static_config ;; 5) edit_static_config ;; 6) edit_middlewares_config ;; 7) edit_entrypoints ;; 8) edit_tls_options ;; 0) ;; *) echo -e "${RED}Ungültige Auswahl.${NC}" ;; esac ;;
+                clear; print_header "Configuration & Routes";
+                echo " 1) Add New Service / Route";
+                echo " 2) Modify Service / Route";
+                echo " 3) Remove Service / Route";
+                echo " 4) Check Static Config (Hint V3)";
+                echo " 5) Edit Static Config (${STATIC_CONFIG_FILE})";
+                echo " 6) Edit Middleware Config (${MIDDLEWARES_FILE})";
+                echo " 7) Edit EntryPoints (${STATIC_CONFIG_FILE})";
+                echo " 8) Edit Global TLS Options (${MIDDLEWARES_FILE})"; # Pointing to middlewares file now
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-8]: " sub_choice
+                case "$sub_choice" in 1) add_service ;; 2) modify_service ;; 3) remove_service ;; 4) check_static_config ;; 5) edit_static_config ;; 6) edit_middlewares_config ;; 7) edit_entrypoints ;; 8) edit_tls_options ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             3) # --- Security & Certificates Submenu ---
-                clear; print_header "Sicherheit & Zertifikate";
-                echo " 1) Dashboard Benutzer verwalten";
-                echo " 2) Zertifikats-Details anzeigen (ACME)";
-                echo " 3) Zertifikatsablauf prüfen (< 14 Tage)";
-                echo " 4) Auf unsichere API prüfen";
-                echo " 5) Fail2Ban Beispiel-Konfig anzeigen";
-                echo " 6) Plugin hinzufügen (Experimentell)";
-                echo " 0) Zurück"; echo "-----------------------------------"; read -p "Auswahl [0-6]: " sub_choice
-                case $sub_choice in 1) manage_dashboard_users ;; 2) show_certificate_info ;; 3) check_certificate_expiry ;; 4) check_insecure_api ;; 5) generate_fail2ban_config ;; 6) install_plugin ;; 0) ;; *) echo -e "${RED}Ungültige Auswahl.${NC}" ;; esac ;;
+                clear; print_header "Security & Certificates";
+                echo " 1) Manage Dashboard Users";
+                echo " 2) Show Certificate Details (ACME)";
+                echo " 3) Check Certificate Expiry (< 14 Days)";
+                echo " 4) Check for Insecure API";
+                echo " 5) Show Example Fail2Ban Config";
+                echo " 6) Add Plugin (Experimental)";
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-6]: " sub_choice
+                case "$sub_choice" in 1) manage_dashboard_users ;; 2) show_certificate_info ;; 3) check_certificate_expiry ;; 4) check_insecure_api ;; 5) generate_fail2ban_config ;; 6) install_plugin ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             4) # --- Service & Logs Submenu ---
-                clear; print_header "Dienst & Logs";
-                echo " 1) Traefik Dienst STARTEN"; echo " 2) Traefik Dienst STOPPEN"; echo " 3) Traefik Dienst NEU STARTEN"; echo " 4) Traefik Dienst STATUS anzeigen";
-                echo " 5) Traefik Log anzeigen (traefik.log)"; echo " 6) Access Log anzeigen (access.log)"; echo " 7) Systemd Journal Log anzeigen (traefik)";
-                echo " 8) IP Access Log anzeigen (${IP_LOG_FILE})"; echo " 9) Autobackup Log anzeigen (File)"; echo "10) Autobackup Log anzeigen (Journal)";
-                echo "11) IP Logger Service Log anzeigen (Journal)";
-                # Auto-Pull Log entfernt
-                echo " 0) Zurück"; echo "-----------------------------------"; read -p "Auswahl [0-11]: " sub_choice # Bereich angepasst
-                case $sub_choice in
+                clear; print_header "Service & Logs";
+                echo " 1) START Traefik Service";
+                echo " 2) STOP Traefik Service";
+                echo " 3) RESTART Traefik Service";
+                echo " 4) Show Traefik Service STATUS";
+                echo " 5) View Traefik Log (traefik.log)";
+                echo " 6) View Access Log (access.log)";
+                echo " 7) View Systemd Journal Log (traefik)";
+                echo " 8) View IP Access Log (${IP_LOG_FILE})";
+                echo " 9) View Autobackup Log (File)";
+                echo "10) View Autobackup Log (Journal)";
+                echo "11) View IP Logger Service Log (Journal)";
+                # Auto-Pull Log removed
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-11]: " sub_choice # Range adjusted
+                case "$sub_choice" in # Quote sub_choice
                      1) manage_service "start" ;; 2) manage_service "stop" ;; 3) manage_service "restart" ;; 4) manage_service "status" ;;
                      5) view_logs "traefik" ;; 6) view_logs "access" ;; 7) view_logs "journal" ;; 8) view_logs "ip_access" ;;
                      9) view_logs "autobackup_file" ;; 10) view_logs "autobackup" ;; 11) view_logs "ip_logger" ;;
-                     # 12 entfernt
-                     0) ;; *) echo -e "${RED}Ungültige Auswahl.${NC}" ;; esac ;;
+                     # 12 removed
+                     0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             5) # --- Backup & Restore Submenu ---
-                 clear; print_header "Backup & Restore"; echo " 1) Backup der Konfiguration erstellen"; echo " 2) Backup wiederherstellen ${YELLOW}(ACHTUNG!)${NC}"; echo " 0) Zurück"; echo "-----------------------------------"; read -p "Auswahl [0-2]: " sub_choice
-                 case $sub_choice in 1) backup_traefik false ;; 2) restore_traefik ;; 0) ;; *) echo -e "${RED}Ungültige Auswahl.${NC}" ;; esac ;; # Explizit false übergeben
+                 clear; print_header "Backup & Restore";
+                 echo " 1) Create Configuration Backup";
+                 echo " 2) Restore Backup ${YELLOW}(CAUTION!)${NC}";
+                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-2]: " sub_choice
+                 case "$sub_choice" in 1) backup_traefik false ;; 2) restore_traefik ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;; # Explicitly pass false
             6) # --- Diagnostics & Info Submenu ---
-                clear; print_header "Diagnose & Info"; echo " 1) Installierte Traefik-Version"; echo " 2) Lauschende Ports prüfen (ss)"; echo " 3) Backend-Erreichbarkeit testen"; echo " 4) Aktive Konfig anzeigen (API/jq)"; echo " 5) Health Check durchführen"; echo " 0) Zurück"; echo "-----------------------------------"; read -p "Auswahl [0-5]: " sub_choice
-                case $sub_choice in 1) show_traefik_version ;; 2) check_listening_ports ;; 3) test_backend_connectivity ;; 4) show_active_config ;; 5) health_check ;; 0) ;; *) echo -e "${RED}Ungültige Auswahl.${NC}" ;; esac ;;
-            7) # --- Automatisierung Submenu ---
-                clear; print_header "Automatisierung";
-                echo " 1) Automatisches Backup einrichten/ändern";
-                echo " 2) Automatisches Backup entfernen";
-                echo " 3) Dediziertes IP Logging einrichten";
-                echo " 4) Dediziertes IP Logging entfernen";
-                # Auto-Pull entfernt
-                echo " 0) Zurück"; echo "-----------------------------------"; read -p "Auswahl [0-4]: " sub_choice # Bereich angepasst
-                case $sub_choice in
+                clear; print_header "Diagnostics & Info";
+                echo " 1) Show Installed Traefik Version";
+                echo " 2) Check Listening Ports (ss)";
+                echo " 3) Test Backend Connectivity";
+                echo " 4) Show Active Config (API/jq)";
+                echo " 5) Perform Health Check";
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-5]: " sub_choice
+                case "$sub_choice" in 1) show_traefik_version ;; 2) check_listening_ports ;; 3) test_backend_connectivity ;; 4) show_active_config ;; 5) health_check ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+            7) # --- Automation Submenu ---
+                clear; print_header "Automation";
+                echo " 1) Setup/Modify Automatic Backup ${GREEN}(Implemented)${NC}";
+                echo " 2) Remove Automatic Backup ${GREEN}(Implemented)${NC}";
+                echo " 3) Setup Dedicated IP Logging ${GREEN}(Implemented)${NC}";
+                echo " 4) Remove Dedicated IP Logging ${GREEN}(Implemented)${NC}";
+                # Auto-Pull removed
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-4]: " sub_choice # Range adjusted
+                case "$sub_choice" in # Quote sub_choice
                     1) setup_autobackup ;;
                     2) remove_autobackup ;;
                     3) setup_ip_logging ;;
                     4) remove_ip_logging ;;
-                    # 5, 6 entfernt
+                    # 5, 6 removed
                     0) ;;
-                    *) echo -e "${RED}Ungültige Auswahl.${NC}" ;;
+                    *) echo -e "${RED}Invalid choice.${NC}" >&2 ;;
                 esac ;;
-            8) # --- Wartung & Updates Submenu (ehemals 9) ---
-                 clear; print_header "Wartung & Updates";
-                 echo " 1) Auf neue Traefik Version prüfen";
-                 echo " 2) Traefik Binary aktualisieren ${YELLOW}(RISIKO!)${NC}";
-                 echo " 3) Zertifikatsablauf prüfen (< 14 Tage)";
-                 echo " 0) Zurück"; echo "-----------------------------------"; read -p "Auswahl [0-3]: " sub_choice
-                 case $sub_choice in
+            8) # --- Maintenance & Updates Submenu ---
+                 clear; print_header "Maintenance & Updates";
+                 echo " 1) Check for New Traefik Version";
+                 echo " 2) Update Traefik Binary ${YELLOW}(RISK!)${NC}";
+                 echo " 3) Check Certificate Expiry (< 14 Days)";
+                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-3]: " sub_choice
+                 case "$sub_choice" in # Quote sub_choice
                     1) check_traefik_updates ;;
                     2) update_traefik_binary ;;
                     3) check_certificate_expiry ;;
                     0) ;;
-                    *) echo -e "${RED}Ungültige Auswahl.${NC}" ;;
-                 esac ;;
-             # Menüpunkt 8 (Git) entfernt
+                    *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+            9) # --- Uninstall ---
+                 uninstall_traefik ;;
             0) # --- Exit Script ---
-                echo "Skript wird beendet. Auf Wiedersehen!"; exit 0 ;;
+                echo "Exiting script. Goodbye!"; exit 0 ;;
             *) # --- Invalid Main Menu Choice ---
-                echo ""; echo -e "${RED}FEHLER: Ungültige Auswahl '$main_choice'.${NC}";;
+                echo ""; echo -e "${RED}ERROR: Invalid choice '$main_choice'.${NC}" >&2 ;;
         esac
 
         # Pause before showing main menu again unless exiting or returning from submenu (choice 0)
         if [[ "$main_choice" != "0" ]]; then
             # Only pause if an action was selected in the submenu (choice > 0) or main choice was invalid
-            # Also check if the main choice itself was valid for the top level menu (1-8)
-            if [[ "$sub_choice" -gt 0 ]] || ! [[ "$main_choice" =~ ^[1-8]$ ]]; then # Bereich angepasst
+            # Also check if the main choice itself was valid for the top level menu (1-9)
+            if [[ "$sub_choice" -gt 0 ]] || ! [[ "$main_choice" =~ ^[1-9]$ ]]; then # Range adjusted
                  # Don't pause if the submenu choice was 0 (Back)
                  if [[ "$sub_choice" -ne 0 ]]; then
-                     echo ""; read -p "... Enter drücken für Hauptmenü ..." dummy_var;
+                     echo ""; read -p "... Press Enter for main menu ..." dummy_var;
                  fi
             fi
         fi
     done
-fi # Ende des interaktiven Modus
+fi # End of interactive mode
 
 exit 0
