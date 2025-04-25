@@ -160,9 +160,15 @@ install_traefik() {
   if [[ -z "$INSTALLED_VERSION" ]]; then echo -e "${YELLOW}WARNING: Could not determine installed version.${NC}" >&2; INSTALLED_VERSION="unknown"; fi
   echo -e "${GREEN} Traefik ${INSTALLED_VERSION} installed.${NC}";
 
-  echo -e "${BLUE}>>> [4/7] Creating ${STATIC_CONFIG_FILE}...${NC}";
+echo -e "${BLUE}>>> [4/7] Creating ${STATIC_CONFIG_FILE}...${NC}";
   if ! sudo mkdir -p "$(dirname "${STATIC_CONFIG_FILE}")"; then echo -e "${RED}ERROR: Could not create config subdirectory.${NC}" >&2; return 1; fi # Ensure config dir exists
-  if ! sudo tee "${STATIC_CONFIG_FILE}" > /dev/null <<EOF
+
+  # Create content in a temporary file first
+  temp_static_config=$(mktemp /tmp/traefik_static.yaml.XXXXXX)
+  # Ensure temporary file is cleaned up if script exits unexpectedly
+  trap "rm -f '${temp_static_config}' 2>/dev/null" EXIT
+
+  cat <<EOF > "${temp_static_config}"
 #-------------------------------------------------------------------------------
 # Main configuration for Traefik ${INSTALLED_VERSION} (Optimized)
 # Created on: $(date)
@@ -183,7 +189,7 @@ log:
   filePath: "${TRAEFIK_LOG_DIR}/traefik.log"
   format: json
 accessLog:
-  filePath: "${TRAEFIK_LOG_DIR}/access.log" # Corrected variable name
+  filePath: "${TRAEFIK_LOG_DIR}/access.log" # TYPO FIXED
   format: json # Important for IP Logger
   bufferingSize: 100
 
@@ -272,12 +278,34 @@ certificatesResolvers:
 # End of main configuration
 #-------------------------------------------------------------------------------
 EOF
-  then echo -e "${GREEN} Main config OK (forwardedHeaders added for 192.168.1.1 - ${YELLOW}PLEASE ADAPT!${NC}).${NC}";
-  else echo -e "${RED}ERROR: Could not create ${STATIC_CONFIG_FILE}.${NC}" >&2; return 1; fi
 
-  echo -e "${BLUE}>>> [5/7] Creating dynamic base configs...${NC}"; echo " - ${MIDDLEWARES_FILE}...";
+  # Check if cat succeeded writing to temp file
+  if [ $? -ne 0 ]; then
+      echo -e "${RED}ERROR: Could not write content to temporary file '${temp_static_config}'.${NC}" >&2
+      rm -f "${temp_static_config}" 2>/dev/null # Clean up temp file
+      trap - EXIT # Remove trap
+      return 1
+  fi
+
+# Now try to move the temporary file into place with sudo
+  if sudo mv "${temp_static_config}" "${STATIC_CONFIG_FILE}"; then
+    # Set permissions after moving
+    if ! sudo chmod 644 "${STATIC_CONFIG_FILE}"; then
+        echo -e "${YELLOW}WARNING: Could not set permissions on ${STATIC_CONFIG_FILE}.${NC}" >&2
+    fi
+    echo -e "${GREEN} Main config OK (forwardedHeaders added for 192.168.1.1 - ${YELLOW}PLEASE ADAPT!${NC}).${NC}";
+    trap - EXIT # Remove cleanup trap on success
+  else
+    # CORRECTED: Commands on separate lines
+    echo -e "${RED}ERROR: Could not create ${STATIC_CONFIG_FILE} (mv failed). Check permissions/filesystem.${NC}" >&2
+    rm -f "${temp_static_config}" 2>/dev/null # Clean up temp file
+    trap - EXIT # Remove trap
+    return 1
+  fi
+
+echo -e "${BLUE}>>> [5/7] Creating dynamic base configs...${NC}"; echo " - ${MIDDLEWARES_FILE}...";
   if ! sudo mkdir -p "$(dirname "${MIDDLEWARES_FILE}")"; then echo -e "${RED}ERROR: Could not create dynamic config directory.${NC}" >&2; return 1; fi # Ensure dynamic_conf dir exists
-  if ! sudo tee "${MIDDLEWARES_FILE}" > /dev/null <<EOF
+  if sudo tee "${MIDDLEWARES_FILE}" > /dev/null <<EOF
 #-------------------------------------------------------------------------------
 # Middleware Definitions & Global TLS Options
 # Created on: $(date)
@@ -329,8 +357,11 @@ tls:
       sniStrict: true
 #-------------------------------------------------------------------------------
 EOF
-  then echo -e "${GREEN} middlewares.yml OK.${NC}"; else echo -e "${RED}ERROR: Could not create ${MIDDLEWARES_FILE}.${NC}" >&2; return 1; fi
-
+  then
+    echo -e "${GREEN} middlewares.yml OK.${NC}";
+  else
+    echo -e "${RED}ERROR: Could not create ${MIDDLEWARES_FILE}.${NC}" >&2; return 1;
+  fi
   echo " - ${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml...";
   if ! sudo tee "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" > /dev/null <<EOF
 #-------------------------------------------------------------------------------
