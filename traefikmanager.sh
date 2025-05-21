@@ -59,6 +59,64 @@ ask_confirmation() { local p=$1; local v=$2; local r; while true; do read -p "${
 is_traefik_installed() { if [[ -f "$TRAEFIK_BINARY_PATH" && -d "$TRAEFIK_CONFIG_DIR" && -f "$STATIC_CONFIG_FILE" ]]; then return 0; else return 1; fi; }
 is_traefik_active() { systemctl is-active --quiet "${TRAEFIK_SERVICE_NAME}"; return $?; }
 
+# Function to check Traefik update status silently
+# Returns: "UPDATE_AVAILABLE", "UP_TO_DATE", or "UNKNOWN"
+get_traefik_update_status() {
+    if ! is_traefik_installed || [[ ! -x "$TRAEFIK_BINARY_PATH" ]]; then
+        echo "UNKNOWN" # Traefik not installed or binary not executable
+        return
+    fi
+
+    local current_version_tag current_version
+    current_version_tag=$("${TRAEFIK_BINARY_PATH}" version 2>/dev/null | grep -i Version | awk '{print $2}')
+
+    if [[ -z "$current_version_tag" ]]; then
+        echo "UNKNOWN" # Could not determine current version
+        return
+    fi
+    # Ensure 'v' prefix for consistency
+    if [[ ! "$current_version_tag" =~ ^v ]]; then
+        current_version_tag="v${current_version_tag}"
+    fi
+    current_version=${current_version_tag#v} # Remove 'v' for comparison
+
+    if ! command -v curl &> /dev/null || ! command -v jq &> /dev/null; then
+        echo "UNKNOWN" # curl or jq not available
+        return
+    fi
+
+    local GITHUB_API_URL="https://api.github.com/repos/traefik/traefik/releases/latest"
+    local fetched_version_output
+    local curl_exit_code
+    fetched_version_output=$(curl --connect-timeout 5 -sfL "${GITHUB_API_URL}" 2>&1)
+    curl_exit_code=$?
+
+    if [[ $curl_exit_code -ne 0 ]]; then
+        echo "UNKNOWN" # curl command failed
+        return
+    fi
+
+    local latest_version_tag latest_version
+    latest_version_tag=$(echo "$fetched_version_output" | jq -r '.tag_name // empty')
+
+    if [[ -z "$latest_version_tag" ]]; then
+        echo "UNKNOWN" # jq parsing failed or tag_name was empty
+        return
+    fi
+    latest_version=${latest_version_tag#v} # Remove 'v' for comparison
+
+    if [[ "$current_version" == "$latest_version" ]]; then
+        echo "UP_TO_DATE"
+    # Use sort -V for robust version comparison. If current_version is sorted first AND is not equal to latest_version, an update is available.
+    elif [[ "$(printf '%s\n%s\n' "$current_version" "$latest_version" | sort -V | head -n 1)" == "$current_version" && "$current_version" != "$latest_version" ]]; then
+        echo "UPDATE_AVAILABLE"
+    else
+        # This case covers if current_version is newer than latest_version (e.g., a dev build or pre-release)
+        # or if sort -V behaves unexpectedly (should not happen with standard versions)
+        echo "UP_TO_DATE" # Treat as up-to-date if newer or versions are unusual
+    fi
+}
+
 check_dependencies() {
     local missing_pkgs=(); local pkgs_to_install=()
     # git removed
@@ -86,7 +144,7 @@ check_dependencies() {
     done
 
     if [ ${#missing_pkgs[@]} -gt 0 ]; then
-        echo -e "${YELLOW}WARNING: The following commands/packages are missing for some core functions:${NC}"; printf "  - %s\n" "${missing_pkgs[@]}"; local install_confirmed=false; ask_confirmation "Install the missing packages (${pkgs_to_install[*]}) now (sudo apt install...)? " install_confirmed
+        echo -e "${YELLOW}WARNING: The following commands/packages are missing for some core functions:${NC}"; printf "  - %s\n" "${missing_pkgs[@]}"; local install_confirmed=false; ask_confirmation "${YELLOW}Install the missing packages (${pkgs_to_install[*]}) now (sudo apt install...)?${NC} " install_confirmed
         if $install_confirmed; then local install_list=$(echo "${pkgs_to_install[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '); echo -e "${BLUE}Installing: ${install_list}...${NC}"; if ! sudo apt-get update || ! sudo apt-get install -y $install_list; then echo -e "${RED}ERROR: Could not install packages.${NC}" >&2; else echo -e "${GREEN}Additional packages installed.${NC}"; fi; else echo -e "${YELLOW}INFO: Missing packages not installed.${NC}"; fi; echo "--------------------------------------------------"; sleep 1
     else echo -e "${GREEN}All required core additional tools are present.${NC}"; fi
 
@@ -116,9 +174,42 @@ print_header() {
 install_traefik() {
   # Removed set -e to handle errors more explicitly
   print_header "Traefik Installation / Update"
-  echo -e "${BLUE}INFO: Installs/updates Traefik.${NC}"; echo "--------------------------------------------------"
-  if is_traefik_installed; then local c=false; ask_confirmation "${YELLOW}WARNING: Traefik exists. Overwrite?${NC}" c; if ! $c; then echo "Aborting."; return 1; fi; echo -e "${YELLOW}INFO: Overwriting...${NC}"; fi
-  read -p "Traefik version [${DEFAULT_TRAEFIK_VERSION}]: " TRAEFIK_VERSION; TRAEFIK_VERSION=${TRAEFIK_VERSION:-$DEFAULT_TRAEFIK_VERSION}; TRAEFIK_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//');
+  echo -e "${BLUE}INFO: Installs/updates Traefik.${NC}"; # echo "--------------------------------------------------" # Moved down
+
+  if is_traefik_installed; then local c=false; ask_confirmation "${YELLOW}WARNING: Traefik already seems to be installed. Overwrite existing configuration and binary?${NC}" c; if ! $c; then echo "Aborting."; return 1; fi; echo -e "${YELLOW}INFO: Proceeding with overwrite...${NC}"; fi
+
+  local suggested_version="${DEFAULT_TRAEFIK_VERSION}" # Initialize with hardcoded default
+
+  echo -e "${BLUE}Attempting to fetch the latest Traefik version from GitHub...${NC}"
+  if command -v curl &> /dev/null && command -v jq &> /dev/null; then
+      local GITHUB_API_URL="https://api.github.com/repos/traefik/traefik/releases/latest"
+      local fetched_latest_version
+      # Add a timeout to curl to prevent long hangs if network is bad
+      # Capture curl error output by redirecting stderr to stdout, then check exit code
+      local curl_output
+      local curl_exit_code
+      curl_output=$(curl --connect-timeout 5 -sfL "${GITHUB_API_URL}" 2>&1)
+      curl_exit_code=$?
+
+      if [[ $curl_exit_code -eq 0 ]]; then
+          fetched_latest_version=$(echo "$curl_output" | jq -r '.tag_name // empty')
+          if [[ -n "$fetched_latest_version" ]]; then
+              echo -e "${GREEN}Latest version found: ${fetched_latest_version}${NC}"
+              suggested_version="$fetched_latest_version"
+          else
+              echo -e "${YELLOW}Could not parse latest version from GitHub response. Using default: ${DEFAULT_TRAEFIK_VERSION}${NC}"
+              # echo -e "Debug: Output from curl was: $curl_output" # Optional for debugging
+          fi
+      else
+          echo -e "${YELLOW}Could not fetch latest version from GitHub (curl code: ${curl_exit_code}). Using default: ${DEFAULT_TRAEFIK_VERSION}${NC}"
+          # echo -e "Debug: Output from curl was: $curl_output" # Optional for debugging
+      fi
+  else
+      echo -e "${YELLOW}INFO: 'curl' and 'jq' are required to fetch the latest version automatically. Using default: ${DEFAULT_TRAEFIK_VERSION}${NC}"
+  fi
+  echo "--------------------------------------------------" # Separator after version fetching attempt
+
+  read -p "Traefik version [${suggested_version}]: " TRAEFIK_VERSION; TRAEFIK_VERSION=${TRAEFIK_VERSION:-$suggested_version}; TRAEFIK_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//');
   read -p "Email for Let's Encrypt: " LETSENCRYPT_EMAIL; while ! [[ "$LETSENCRYPT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; do echo -e "${RED}ERROR: Invalid email.${NC}" >&2; read -p "Email: " LETSENCRYPT_EMAIL; done;
   read -p "Domain for Dashboard (e.g., traefik.yourdomain.com): " TRAEFIK_DOMAIN; while [[ -z "$TRAEFIK_DOMAIN" ]]; do echo -e "${RED}ERROR: Domain missing.${NC}" >&2; read -p "Dashboard Domain: " TRAEFIK_DOMAIN; done;
   read -p "Dashboard username: " BASIC_AUTH_USER; while [[ -z "$BASIC_AUTH_USER" ]]; do echo -e "${RED}ERROR: Username missing.${NC}" >&2; read -p "Login username: " BASIC_AUTH_USER; done;
@@ -139,7 +230,7 @@ install_traefik() {
 
   echo -e "${BLUE}>>> [3/7] Downloading Traefik ${TRAEFIK_VERSION}...${NC}";
   local ARCH=$(dpkg --print-architecture); local TARGET_ARCH="amd64";
-  if [[ "$ARCH" != "$TARGET_ARCH" ]]; then local ac=false; ask_confirmation "${YELLOW}WARNING: Arch mismatch ('${ARCH}' vs '${TARGET_ARCH}'). Continue?${NC}" ac; if ! $ac; then echo "Aborting."; return 1; fi; fi;
+  if [[ "$ARCH" != "$TARGET_ARCH" ]]; then local ac=false; ask_confirmation "${YELLOW}WARNING: Your system architecture ('${ARCH}') differs from the typical target ('${TARGET_ARCH}'). Continue download?${NC}" ac; if ! $ac; then echo "Aborting."; return 1; fi; fi;
   local DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${TRAEFIK_VERSION}/traefik_${TRAEFIK_VERSION}_linux_${TARGET_ARCH}.tar.gz";
   local TAR_FILE="/tmp/traefik_${TRAEFIK_VERSION}_linux_${TARGET_ARCH}.tar.gz";
   echo " From: ${DOWNLOAD_URL}"; rm -f "$TAR_FILE";
@@ -473,15 +564,15 @@ add_service() {
     if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
     read -p "1. Unique name for this service (e.g., 'nextcloud'): " SERVICE_NAME; SERVICE_NAME=$(echo "$SERVICE_NAME" | sed -e 's/[^a-z0-9_-]//g' | tr '[:upper:]' '[:lower:]'); while [[ -z "$SERVICE_NAME" ]]; do echo -e "${RED}ERROR: Service name cannot be empty.${NC}" >&2; read -p "1. Service name (can only contain a-z, 0-9, -, _): " SERVICE_NAME; SERVICE_NAME=$(echo "$SERVICE_NAME" | sed -e 's/[^a-z0-9_-]//g' | tr '[:upper:]' '[:lower:]'); done
     CONFIG_FILE="${TRAEFIK_DYNAMIC_CONF_DIR}/${SERVICE_NAME}.yml"; echo "     INFO: Configuration file: '${CONFIG_FILE}'"
-    if [[ -f "$CONFIG_FILE" ]]; then local ow=false; ask_confirmation "${YELLOW}WARNING: File already exists. Overwrite?${NC}" ow; if ! $ow; then echo "Aborting."; return 1; fi; echo "     INFO: Overwriting..."; fi
+    if [[ -f "$CONFIG_FILE" ]]; then local ow=false; ask_confirmation "${YELLOW}WARNING: Configuration file '${CONFIG_FILE}' already exists. Overwrite?${NC}" ow; if ! $ow; then echo "Aborting."; return 1; fi; echo "     INFO: Overwriting..."; fi
     read -p "2. Full domain (e.g., 'cloud.domain.com'): " FULL_DOMAIN; while [[ -z "$FULL_DOMAIN" ]]; do echo -e "${RED}ERROR: Domain missing.${NC}" >&2; read -p "2. Domain: " FULL_DOMAIN; done
     read -p "3. Internal IP/Hostname of the target: " BACKEND_TARGET; while [[ -z "$BACKEND_TARGET" ]]; do echo -e "${RED}ERROR: IP/Hostname missing.${NC}" >&2; read -p "3. IP/Hostname: " BACKEND_TARGET; done
     read -p "4. Internal port of the target: " BACKEND_PORT; while ! [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || [[ "$BACKEND_PORT" -lt 1 ]] || [[ "$BACKEND_PORT" -gt 65535 ]]; do echo -e "${RED}ERROR: Invalid port.${NC}" >&2; read -p "4. Port (1-65535): " BACKEND_PORT; done
-    local backend_uses_https=false; ask_confirmation "5. Does the target service itself use HTTPS (https://...)? " backend_uses_https
+    local backend_uses_https=false; ask_confirmation "5. Does the target service itself use HTTPS (e.g., https://${BACKEND_TARGET}:${BACKEND_PORT})? " backend_uses_https
     BACKEND_SCHEME="http"; local transport_ref_yaml=""; local transport_def_yaml=""; local transport_name=""; local transport_warning=""
     if $backend_uses_https; then
         BACKEND_SCHEME="https"; local skip_verify=false
-        ask_confirmation "6. Ignore backend's SSL certificate (yes=insecure, needed for self-signed certs)? " skip_verify
+        ask_confirmation "${YELLOW}6. Ignore backend's SSL certificate (e.g., for self-signed certificates)? Warning: less secure.${NC}" skip_verify
         if $skip_verify; then transport_name="transport-${SERVICE_NAME}"; transport_ref_yaml=$(printf "\n        serversTransport: %s" "${transport_name}"); transport_def_yaml=$(printf "\n\n  serversTransports:\n    %s:\n      insecureSkipVerify: true" "${transport_name}"); transport_warning="# WARNING: Backend SSL verification disabled!"; echo -e "     ${YELLOW}INFO: Backend certificate check will be skipped (via ${transport_name}).${NC}"; else echo "     INFO: Backend certificate will be verified (default)."; fi
     fi
     echo -e "${BLUE}Creating configuration with correct formatting...${NC}";
@@ -577,12 +668,12 @@ install_plugin() {
     # Use awk for more robust insertion after 'plugins:'
     # Check if 'experimental:' and 'plugins:' exist, create if not
     if ! grep -q -E "^experimental:" "${temp_yaml}"; then
-        echo -e "${BLUE}INFO: Adding 'experimental:' and 'plugins:'...${NC}"
+        echo -e "${BLUE}INFO: Adding 'experimental:' and 'plugins:' section to ${STATIC_CONFIG_FILE}...${NC}"
         printf "\nexperimental:\n  plugins:\n" >> "${temp_yaml}"
     elif ! grep -q -E "^\s*plugins:" "${temp_yaml}"; then
-        echo -e "${BLUE}INFO: Adding 'plugins:' under 'experimental:'...${NC}"
+        echo -e "${BLUE}INFO: Adding 'plugins:' under 'experimental:' in ${STATIC_CONFIG_FILE}...${NC}"
         # Insert '  plugins:' after the first 'experimental:' line
-        if ! sudo sed -i '/^experimental:/a \ \ plugins:' "${temp_yaml}"; then
+        if ! sudo sed -i '/^experimental:/a \ \ plugins:' "${temp_yaml}"; then # Ensure correct indentation for 'plugins:'
              echo -e "${RED}ERROR: Could not insert 'plugins:' into temporary file.${NC}" >&2; return 1;
         fi
     fi
@@ -591,7 +682,7 @@ install_plugin() {
     # Ensure block is correctly indented (usually 4 spaces under 'plugins:')
     local plugin_block; printf -v plugin_block "    # Plugin %s added on %s\n    %s:\n      moduleName: \"%s\"\n      version: \"%s\"" "${PLUGIN_KEY_NAME}" "$(date +%Y-%m-%d)" "${PLUGIN_KEY_NAME}" "${MODULE_NAME}" "${VERSION}"
 
-    echo -e "${BLUE}INFO: Adding plugin declaration...${NC}"
+    echo -e "${BLUE}INFO: Adding plugin declaration to temporary config...${NC}"
     # Use awk to insert the block after the first line matching /^\s*plugins:/
     # This assumes 'plugins:' is at the correct indentation level already.
     if ! awk -v block="$plugin_block" '/^\s*plugins:/ && !p { print; print block; p=1; next } 1' "${temp_yaml}" > "${temp_yaml}.new"; then
@@ -603,12 +694,12 @@ install_plugin() {
         echo -e "${BLUE}INFO: Checking temporary YAML file with 'yamllint'...${NC}"
         if ! yamllint "${temp_yaml}.new"; then
              echo -e "${RED}ERROR: YAML syntax error in the prepared configuration!${NC}" >&2
-             echo -e "${RED}        The change will NOT be applied.${NC}" >&2
+             echo -e "${RED}        The change will NOT be applied. Please check the temporary file: ${temp_yaml}.new${NC}" >&2
              return 1
         fi
         echo -e "${GREEN}INFO: YAML syntax of prepared configuration seems OK.${NC}"
     else
-         echo -e "${YELLOW}HINT: 'yamllint' not found, YAML syntax check skipped.${NC}"
+         echo -e "${YELLOW}HINT: 'yamllint' not found (sudo apt install yamllint). YAML syntax check skipped.${NC}"
     fi
 
 
@@ -622,7 +713,7 @@ install_plugin() {
     echo -e "${GREEN}INFO: Plugin declaration added to ${STATIC_CONFIG_FILE}.${NC}";
     # git_auto_commit removed
 
-    echo "--------------------------------------------------"; echo -e "${YELLOW}IMPORTANT: Plugin added.${NC}"; echo -e "${YELLOW}         >> PLEASE CHECK ${STATIC_CONFIG_FILE} MANUALLY << (indentation!).${NC}"; echo -e "${YELLOW}         Traefik RESTART required!${NC}"; echo "--------------------------------------------------"; local r=false; ask_confirmation "Restart Traefik now?" r; if $r; then manage_service "restart"; else echo "INFO: Traefik not restarted."; fi;
+    echo "--------------------------------------------------"; echo -e "${YELLOW}IMPORTANT: Plugin added. Please manually verify indentation in ${STATIC_CONFIG_FILE}.${NC}"; echo -e "${YELLOW}         Traefik RESTART required to load the new plugin!${NC}"; echo "--------------------------------------------------"; local r=false; ask_confirmation "${YELLOW}Restart Traefik now to attempt loading the plugin?${NC}" r; if $r; then manage_service "restart"; else echo -e "${YELLOW}INFO: Traefik not restarted. Plugin will not be active yet.${NC}"; fi;
     return 0
 } # End install_plugin
 
@@ -659,7 +750,7 @@ setup_autobackup() {
 
     if [[ -f "$service_file" || -f "$timer_file" ]]; then
         echo -e "${YELLOW}WARNING: Autobackup service/timer files already exist.${NC}"
-        ask_confirmation "Overwrite existing files and reconfigure?" overwrite_confirmed
+        ask_confirmation "${YELLOW}Overwrite existing autobackup files and reconfigure?${NC}" overwrite_confirmed
         if ! $overwrite_confirmed; then
             echo "Aborting."; return 1
         fi
@@ -833,7 +924,7 @@ setup_ip_logging() {
 
     if [[ -f "$service_file" || -f "$timer_file" || -f "$IPLOGGER_HELPER_SCRIPT" || -f "$IPLOGGER_LOGROTATE_CONF" ]]; then
         echo -e "${YELLOW}WARNING: IP Logger files (Service/Timer/Script/Logrotate) already partially exist.${NC}"
-        ask_confirmation "Overwrite existing files and reconfigure?" overwrite_confirmed
+        ask_confirmation "${YELLOW}Overwrite existing IP Logger files and reconfigure?${NC}" overwrite_confirmed
         if ! $overwrite_confirmed; then
             echo "Aborting."; return 1
         fi
@@ -1110,11 +1201,11 @@ restore_traefik() {
     # Use find with -print0 and read -d $'\0' for robustness with filenames, sort by time
     # FIX: Corrected syntax error (removed stray fi;) and unnecessary tr command
     while IFS= read -r -d $'\0' file; do files+=("$(basename "$file")"); echo -e "    ${BOLD}${i})${NC} $(basename "$file") ($(stat -c %y "$file" 2>/dev/null | cut -d'.' -f1))"; ((i++)); done < <(find "${BACKUP_DIR}" -maxdepth 1 -name 'traefik-backup-*.tar.gz' -type f -printf '%T@ %p\0' | sort -znr | cut -z -d' ' -f2-)
-    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}No backups found.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Back"; echo "--------------------------------------------------"; local choice; read -p "Number of the backup [0-${#files[@]}]: " choice
+    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}No backups found in ${BACKUP_DIR}.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Back"; echo "--------------------------------------------------"; local choice; read -p "Number of the backup to restore [0-${#files[@]}]: " choice
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 0 ]] || [[ "$choice" -gt ${#files[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; return 1; fi; if [[ "$choice" -eq 0 ]]; then echo "Aborting."; return 1; fi
-    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${BACKUP_DIR}/${fname}"; echo "--------------------------------------------------"; echo "Selection: ${fname}"; echo "Target (will be overwritten): ${TRAEFIK_CONFIG_DIR}"; echo "--------------------------------------------------"; local restore_confirmed=false; ask_confirmation "${RED}ABSOLUTELY SURE? Current config will be overwritten!${NC}" restore_confirmed; if ! $restore_confirmed; then echo "Aborting."; return 1; fi
-    echo -e "${BLUE}INFO: Stopping Traefik...${NC}"; if is_traefik_active; then manage_service "stop"; sleep 1; if is_traefik_active; then echo -e "${RED}ERROR: Could not stop Traefik.${NC}" >&2; return 1; fi; else echo "INFO: Was not running."; fi
-    echo "Restoring backup '${fname}' to ${TRAEFIK_CONFIG_DIR} ...";
+    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${BACKUP_DIR}/${fname}"; echo "--------------------------------------------------"; echo -e "${BLUE}Selected backup:${NC} ${fname}"; echo -e "${RED}Target directory (will be OVERWRITTEN):${NC} ${TRAEFIK_CONFIG_DIR}"; echo "--------------------------------------------------"; local restore_confirmed=false; ask_confirmation "${RED}${BOLD}ABSOLUTELY SURE?${NC}${RED} Current configuration in ${TRAEFIK_CONFIG_DIR} will be DELETED and replaced by the backup! This cannot be undone.${NC}" restore_confirmed; if ! $restore_confirmed; then echo "Aborting."; return 1; fi
+    echo -e "${BLUE}INFO: Stopping Traefik service before restoring...${NC}"; if is_traefik_active; then manage_service "stop"; sleep 1; if is_traefik_active; then echo -e "${RED}ERROR: Could not stop Traefik. Restore aborted.${NC}" >&2; return 1; fi; else echo "INFO: Traefik was not running."; fi
+    echo -e "${BLUE}Restoring backup '${fname}' to ${TRAEFIK_CONFIG_DIR} ...${NC}";
 
     # Ensure the target directory exists before extracting into it
     if ! sudo mkdir -p "${TRAEFIK_CONFIG_DIR}"; then
@@ -1218,9 +1309,9 @@ view_logs() {
 #===============================================================================
 uninstall_traefik() {
     echo ""; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo -e "${RED}!! ATTENTION: UNINSTALLATION! EVERYTHING WILL BE GONE! NO GOING BACK!      !!${NC}"; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo "Are you sure? All that work..."; echo " - Service? Gone."; echo " - Binary? Gone."; echo " - Configs (${TRAEFIK_CONFIG_DIR})? All gone."; echo " - Logs (${TRAEFIK_LOG_DIR})? Gone too."; echo ""; echo "Apt packages will remain though."; echo -e "${RED}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"; echo ""
-    if ! is_traefik_installed; then echo "INFO: Traefik does not seem to be (fully) installed."; local c=false; ask_confirmation "Attempt to clean up known remnants anyway?" c; if ! $c; then echo "Aborting."; return 1; fi; else local d=false; ask_confirmation "${RED}Last chance: Really DELETE EVERYTHING related to Traefik?${NC}" d; if ! $d; then echo "Aborting."; return 1; fi; fi; echo ""; echo ">>> Starting uninstallation...";
+    if ! is_traefik_installed; then echo -e "${YELLOW}INFO: Traefik does not seem to be (fully) installed.${NC}"; local c=false; ask_confirmation "${YELLOW}Attempt to clean up known remnants (files/folders) anyway?${NC}" c; if ! $c; then echo "Aborting."; return 1; fi; else local d=false; ask_confirmation "${RED}${BOLD}Last chance:${NC}${RED} Really DELETE EVERYTHING related to Traefik (configs, binary, logs, service files)? This is irreversible!${NC}" d; if ! $d; then echo "Aborting."; return 1; fi; fi; echo ""; echo -e "${BLUE}>>> Starting uninstallation...${NC}";
     # Remove automation units - Call implemented functions
-    echo "[0/8] Stopping & removing automation..."; # Numbering adjusted
+    echo -e "${BLUE}[0/8] Stopping & removing automation units...${NC}"; # Numbering adjusted
     remove_autobackup || echo -e "${YELLOW}WARNING: Error removing autobackup units.${NC}" >&2
     remove_ip_logging || echo -e "${YELLOW}WARNING: Error removing IP logging units/scripts.${NC}" >&2
     # remove_autopull removed
@@ -1301,13 +1392,13 @@ check_static_config() {
 #===============================================================================
 edit_static_config() {
     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Edit Static Traefik Configuration${NC}"; echo -e "${MAGENTA}==================================================${NC}"
-    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}ERROR: File (${STATIC_CONFIG_FILE}) not found.${NC}" >&2; return 1; fi; local editor="${EDITOR:-nano}"; echo -e "${YELLOW}WARNING: Changes here usually require a Traefik restart!${NC}"; echo "--------------------------------------------------"; echo "Opening '${STATIC_CONFIG_FILE}' with '${editor}'..."; sleep 2
+    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}ERROR: File (${STATIC_CONFIG_FILE}) not found.${NC}" >&2; return 1; fi; local editor="${EDITOR:-nano}"; echo -e "${YELLOW}WARNING: Changes to the static configuration usually require a Traefik restart to take effect!${NC}"; echo "--------------------------------------------------"; echo "Opening '${STATIC_CONFIG_FILE}' with '${editor}'..."; sleep 2
     # Use sudo -E to preserve EDITOR environment variable
     if sudo -E "$editor" "$STATIC_CONFIG_FILE"; then
         echo ""; echo -e "${GREEN}File edited.${NC}";
         # git_auto_commit removed
-        local c=false; ask_confirmation "Check basic YAML syntax (with yamllint, if installed)?" c; if $c; then check_static_config; fi;
-        local r=false; ask_confirmation "Restart Traefik?" r; if $r; then manage_service "restart"; fi;
+        local c=false; ask_confirmation "${CYAN}Check basic YAML syntax now (with yamllint, if installed)?${NC}" c; if $c; then check_static_config; fi;
+        local r=false; ask_confirmation "${YELLOW}Restart Traefik now to apply changes?${NC}" r; if $r; then manage_service "restart"; fi;
     else
          echo -e "${YELLOW}WARNING: Editor exited with an error or file not saved.${NC}" >&2; return 1;
     fi; return 0
@@ -1379,14 +1470,16 @@ manage_dashboard_users() {
 
     while true; do
         clear; print_header "Manage Dashboard Users";
-        echo -e "| Auth File: ${BOLD}${TRAEFIK_AUTH_FILE}${NC} |"
+        echo -e "| Auth File: ${BOLD}${TRAEFIK_AUTH_FILE}${NC}           |" # Adjusted padding
         echo "+-----------------------------------------+"
-        echo -e "|   ${BOLD}1)${NC} Add User                         |"
-        echo -e "|   ${BOLD}2)${NC} Remove User                      |"
-        echo -e "|   ${BOLD}3)${NC} Change Password                  |"
-        echo -e "|   ${BOLD}4)${NC} List Users                       |"
-        echo -e "|   ${BOLD}0)${NC} Back to Main Menu                |"
-        echo "+-----------------------------------------+"; read -p "Choice [0-4]: " user_choice
+        echo -e "|   ${BOLD}1)${NC} Add User                           |";
+        echo -e "|   ${BOLD}2)${NC} Remove User                        |";
+        echo -e "|   ${BOLD}3)${NC} Change Password                    |";
+        echo -e "|   ${BOLD}4)${NC} List Users                         |";
+        echo "|-----------------------------------------|";
+        echo -e "|   ${BOLD}0)${NC} Back to Main Menu                  |";
+        echo "+-----------------------------------------+";
+        read -p "Choice [0-4]: " user_choice
 
         local changes_made=false
         case "$user_choice" in # Quote user_choice
@@ -1535,15 +1628,15 @@ test_backend_connectivity() {
     echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Test Backend Connectivity${NC}"; echo -e "${MAGENTA}==================================================${NC}"
     if ! command -v curl &> /dev/null; then echo -e "${RED}ERROR: 'curl' not found.${NC}" >&2; check_dependencies; if ! command -v curl &> /dev/null; then return 1; fi; fi;
     read -p "Internal URL of the backend (e.g., http://192.168.1.50:8080 or https://service.local): " url; while [[ -z "$url" ]]; do echo -e "${RED}ERROR: URL cannot be empty.${NC}" >&2; read -p "URL: " url; done
-    echo "--------------------------------------------------"; echo "Testing connection to: ${url}";
+    echo "--------------------------------------------------"; echo -e "${BLUE}Testing connection to: ${url}${NC}";
     local opts="-vL --connect-timeout 5 --max-time 10"; # Added max-time
     local insecure_flag=""; local insecure_opt="";
     if [[ "$url" == https://* ]]; then
-        local ignore_ssl=false; ask_confirmation "Ignore backend SSL/TLS certificate (insecure, for self-signed certs)? " ignore_ssl;
-        if $ignore_ssl; then insecure_opt="-k"; insecure_flag="(SSL check ignored)"; else insecure_flag="(SSL check active)"; fi;
+        local ignore_ssl=false; ask_confirmation "${YELLOW}Ignore backend SSL/TLS certificate (insecure, for self-signed certs)?${NC} " ignore_ssl;
+        if $ignore_ssl; then insecure_opt="-k"; insecure_flag="${YELLOW}(SSL certificate check ignored - INSECURE)${NC}"; else insecure_flag="${GREEN}(SSL certificate check active)${NC}"; fi;
         opts="-vL${insecure_opt} --connect-timeout 5 --max-time 10";
     fi;
-    echo "Executing: curl ${opts} \"${url}\" ${insecure_flag}"; # Quote URL
+    echo -e "Executing: curl ${opts} \"${url}\" ${insecure_flag}"; # Quote URL
     echo "--------------------------------------------------";
     local curl_output;
     # Capture stderr and stdout
@@ -1919,42 +2012,68 @@ update_traefik_binary() {
     echo -e "${BLUE}Currently installed version: ${current_version_tag}${NC}"
 
     # Determine latest version
-    local latest_version_tag latest_version
-    echo "Determining latest version from GitHub..."
-    latest_version_tag=$(curl -sfL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | jq -r '.tag_name // empty')
+    local latest_version_tag="" # Initialize as empty
+    local target_version=""
 
-    if [[ -z "$latest_version_tag" || "$latest_version_tag" == "null" ]]; then
-        echo -e "${YELLOW}WARNING: Could not determine latest version automatically.${NC}" >&2
-        latest_version_tag="N/A"
+    echo -e "${BLUE}Attempting to fetch the latest Traefik version from GitHub...${NC}"
+    if command -v curl &> /dev/null && command -v jq &> /dev/null; then
+        local GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+        local fetched_version_output
+        local curl_exit_code
+        # Capture curl output (stdout and stderr) and exit code
+        fetched_version_output=$(curl --connect-timeout 5 -sfL "${GITHUB_API_URL}" 2>&1)
+        curl_exit_code=$?
+
+        if [[ $curl_exit_code -eq 0 ]]; then
+            latest_version_tag=$(echo "$fetched_version_output" | jq -r '.tag_name // empty')
+            if [[ -z "$latest_version_tag" ]]; then
+                echo -e "${YELLOW}Could not parse latest version from GitHub response. Please enter version manually.${NC}" >&2
+                # echo "DEBUG: Output from curl was: $fetched_version_output" # For debugging
+                latest_version_tag="" # Ensure it's empty
+            fi
+        else
+            echo -e "${YELLOW}Could not fetch latest version from GitHub (curl code: ${curl_exit_code}). Please enter version manually.${NC}" >&2
+            # echo "DEBUG: Output from curl was: $fetched_version_output" # For debugging
+            latest_version_tag="" # Ensure it's empty
+        fi
     else
-         echo "Latest version found: ${latest_version_tag}"
+        echo -e "${YELLOW}INFO: 'curl' and 'jq' are required to fetch the latest version automatically. Please enter version manually.${NC}"
+        latest_version_tag="" # Ensure it's empty
+    fi
+    echo "--------------------------------------------------" # Separator
+
+    if [[ -n "$latest_version_tag" ]]; then
+        echo -e "${GREEN}Latest version found: ${latest_version_tag}${NC}"
+        read -p "Version to install [Default: ${latest_version_tag}]: " target_version
+        target_version=${target_version:-$latest_version_tag} # Default to fetched if user presses Enter
+    else
+        # This else block covers curl/jq missing, curl error, or jq error
+        read -p "Please enter Traefik version to install (e.g., v3.1.0): " target_version
     fi
 
-    local target_version
-    read -p "Version to install [Default: ${latest_version_tag}]: " target_version
-    # Set default value, even if N/A was determined
-    if [[ -z "$target_version" ]] && [[ "$latest_version_tag" != "N/A" ]]; then
-        target_version="$latest_version_tag"
-    elif [[ -z "$target_version" ]] && [[ "$latest_version_tag" == "N/A" ]]; then
-         echo -e "${RED}ERROR: No target version specified and could not determine latest version.${NC}" >&2; return 1;
-    fi
-    # Ensure 'v' is at the beginning for consistency
+    # Loop to ensure target_version is not empty, especially if auto-detection failed
+    while [[ -z "$target_version" ]]; do
+        echo -e "${RED}ERROR: No target version specified and automatic detection failed.${NC}" >&2
+        read -p "Please enter Traefik version to install (e.g., v3.1.0): " target_version
+    done
+
+    # Ensure 'v' is at the beginning for consistency, if not already
     if [[ ! "$target_version" =~ ^v ]]; then target_version="v${target_version}"; fi
 
     if [[ "$target_version" == "$current_version_tag" ]]; then
-        echo -e "${YELLOW}INFO: Target version ${target_version} is already installed.${NC}"; return 0;
+        echo -e "${YELLOW}INFO: Target version ${target_version} is the same as the currently installed version (${current_version_tag}). No update needed.${NC}"; return 0;
     fi
 
-    echo "--------------------------------------------------"
-    echo -e "Update from ${BOLD}${current_version_tag}${NC} to ${BOLD}${target_version}${NC} is being prepared."
+    echo "--------------------------------------------------" # Separator before confirmation
+    echo -e "${BLUE}Update from ${BOLD}${current_version_tag}${NC} to ${BOLD}${target_version}${NC} is being prepared.${NC}"
     local confirm_update=false
-    ask_confirmation "Are you sure you want to update the Traefik binary? (Stops Traefik briefly)" confirm_update
+    ask_confirmation "${YELLOW}Are you sure you want to update the Traefik binary? Traefik service will be stopped briefly during the update.${NC}" confirm_update
     if ! $confirm_update; then echo "Aborting."; return 1; fi
 
     local ARCH=$(dpkg --print-architecture); local TARGET_ARCH="amd64";
     if [[ "$ARCH" != "$TARGET_ARCH" ]]; then
-         echo -e "${YELLOW}WARNING: Architecture (${ARCH}) differs from 'amd64'. Download might fail.${NC}" >&2;
-         local confirm_arch=false; ask_confirmation "Continue anyway?" confirm_arch; if ! $confirm_arch; then return 1; fi
+         echo -e "${YELLOW}WARNING: Your system architecture ('${ARCH}') differs from the typical target ('${TARGET_ARCH}'). The download might fail or the binary may not work.${NC}" >&2;
+         local confirm_arch=false; ask_confirmation "${YELLOW}Continue with download anyway?${NC}" confirm_arch; if ! $confirm_arch; then echo "Aborting update."; return 1; fi
     fi
 
     local DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${target_version}/traefik_${target_version}_linux_${TARGET_ARCH}.tar.gz"
@@ -2087,7 +2206,20 @@ if ! $non_interactive_mode; then
     check_dependencies # Check tools directly at the beginning
 
     while true; do
+        # Get Traefik update status before printing header or menu
+        update_status_result="" # Removed local
+        if is_traefik_installed; then # Only check if Traefik is installed
+             update_status_result=$(get_traefik_update_status)
+        fi
+
         print_header "Main Menu - Traefik Management"
+
+        # Prepare Maintenance & Updates menu line
+        maintenance_menu_line="| ${CYAN}8) Maintenance & Updates           ${NC} |" # Default, removed local
+        if [[ "$update_status_result" == "UPDATE_AVAILABLE" ]]; then
+            # Text "Maintenance & Updates (New!)" is 29 chars. Pad with 4 spaces for 33.
+            maintenance_menu_line="| ${CYAN}8) Maintenance & Updates ${YELLOW}(New!)${NC}      |";
+        fi
 
         # Menu items - Renumbered after removing Git
         echo -e "| ${CYAN}1) Installation & Initial Setup    ${NC} |"
@@ -2097,59 +2229,78 @@ if ! $non_interactive_mode; then
         echo -e "| ${CYAN}5) Backup & Restore                ${NC} |"
         echo -e "| ${CYAN}6) Diagnostics & Info              ${NC} |"
         echo -e "| ${CYAN}7) Automation                      ${NC} |"
-        echo -e "| ${CYAN}8) Maintenance & Updates           ${NC} |"
+        echo -e "${maintenance_menu_line}" # Use the prepared variable
         echo "|-----------------------------------------|"
-        echo -e "| ${BOLD}9) Uninstall Traefik ${RED}(RISK!)      ${NC} |" # Uninstall moved to top level
+        echo -e "|   ${BOLD}9)${NC} Uninstall Traefik ${RED}(RISK!)      ${NC} |" # Uninstall moved to top level
         echo "|-----------------------------------------|"
-        echo -e "| ${BOLD}0) Exit Script                     ${NC} |"
+        echo -e "|   ${BOLD}0)${NC} Exit Script                     ${NC} |"
         echo "+-----------------------------------------+";
         read -p "Your choice [0-9]: " main_choice # Range adjusted
 
-        local sub_choice=-1 # Reset sub_choice
+        sub_choice=-1 # Reset sub_choice, removed local
 
         case "$main_choice" in # Quote main_choice
             1) # --- Install / Update Submenu ---
                 clear; print_header "Installation & Initial Setup";
-                echo " 1) Install / Overwrite Traefik";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-1]: " sub_choice
+                echo -e "|   ${BOLD}1)${NC} Install / Overwrite Traefik        |";
+                echo "|-----------------------------------------|";
+                echo -e "|   ${BOLD}0)${NC} Back                               |";
+                echo "+-----------------------------------------+";
+                read -p "Choice [0-1]: " sub_choice
                 case "$sub_choice" in 1) install_traefik ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             2) # --- Config & Routes Submenu ---
                 clear; print_header "Configuration & Routes";
-                echo " 1) Add New Service / Route";
-                echo " 2) Modify Service / Route";
-                echo " 3) Remove Service / Route";
-                echo " 4) Check Static Config (Hint V3)";
-                echo " 5) Edit Static Config (${STATIC_CONFIG_FILE})";
-                echo " 6) Edit Middleware Config (${MIDDLEWARES_FILE})";
-                echo " 7) Edit EntryPoints (${STATIC_CONFIG_FILE})";
-                echo " 8) Edit Global TLS Options (${MIDDLEWARES_FILE})"; # Pointing to middlewares file now
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-8]: " sub_choice
+                echo -e "|   ${BOLD}1)${NC} Add New Service / Route            |";
+                echo -e "|   ${BOLD}2)${NC} Modify Service / Route             |";
+                echo -e "|   ${BOLD}3)${NC} Remove Service / Route             |";
+                echo "|-----------------------------------------|";
+                echo -e "|   ${BOLD}4)${NC} Check Static Config (Hint V3)      |";
+                echo -e "|   ${BOLD}5)${NC} Edit Static Config (...)           |";
+                echo -e "|      ${YELLOW}(${STATIC_CONFIG_FILE})${NC}      |";
+                echo -e "|   ${BOLD}6)${NC} Edit Middleware Config (...)       |";
+                echo -e "|      ${YELLOW}(${MIDDLEWARES_FILE})${NC}      |";
+                echo -e "|   ${BOLD}7)${NC} Edit EntryPoints (...)             |";
+                echo -e "|      ${YELLOW}(${STATIC_CONFIG_FILE})${NC}      |";
+                echo -e "|   ${BOLD}8)${NC} Edit Global TLS Opts (...)         |";
+                echo -e "|      ${YELLOW}(${MIDDLEWARES_FILE})${NC}      |";
+                echo "|-----------------------------------------|";
+                echo -e "|   ${BOLD}0)${NC} Back                               |";
+                echo "+-----------------------------------------+";
+                read -p "Choice [0-8]: " sub_choice
                 case "$sub_choice" in 1) add_service ;; 2) modify_service ;; 3) remove_service ;; 4) check_static_config ;; 5) edit_static_config ;; 6) edit_middlewares_config ;; 7) edit_entrypoints ;; 8) edit_tls_options ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             3) # --- Security & Certificates Submenu ---
                 clear; print_header "Security & Certificates";
-                echo " 1) Manage Dashboard Users";
-                echo " 2) Show Certificate Details (ACME)";
-                echo " 3) Check Certificate Expiry (< 14 Days)";
-                echo " 4) Check for Insecure API";
-                echo " 5) Show Example Fail2Ban Config";
-                echo " 6) Add Plugin (Experimental)";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-6]: " sub_choice
+                echo -e "|   ${BOLD}1)${NC} Manage Dashboard Users             |";
+                echo -e "|   ${BOLD}2)${NC} Show Certificate Details (ACME)    |";
+                echo -e "|   ${BOLD}3)${NC} Check Cert Expiry (< 14 Days)    |";
+                echo -e "|   ${BOLD}4)${NC} Check for Insecure API             |";
+                echo -e "|   ${BOLD}5)${NC} Show Example Fail2Ban Config       |";
+                echo -e "|   ${BOLD}6)${NC} Add Plugin (Experimental)          |";
+                echo "|-----------------------------------------|";
+                echo -e "|   ${BOLD}0)${NC} Back                               |";
+                echo "+-----------------------------------------+";
+                read -p "Choice [0-6]: " sub_choice
                 case "$sub_choice" in 1) manage_dashboard_users ;; 2) show_certificate_info ;; 3) check_certificate_expiry ;; 4) check_insecure_api ;; 5) generate_fail2ban_config ;; 6) install_plugin ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             4) # --- Service & Logs Submenu ---
                 clear; print_header "Service & Logs";
-                echo " 1) START Traefik Service";
-                echo " 2) STOP Traefik Service";
-                echo " 3) RESTART Traefik Service";
-                echo " 4) Show Traefik Service STATUS";
-                echo " 5) View Traefik Log (traefik.log)";
-                echo " 6) View Access Log (access.log)";
-                echo " 7) View Systemd Journal Log (traefik)";
-                echo " 8) View IP Access Log (${IP_LOG_FILE})";
-                echo " 9) View Autobackup Log (File)";
-                echo "10) View Autobackup Log (Journal)";
-                echo "11) View IP Logger Service Log (Journal)";
+                echo -e "|   ${BOLD}1)${NC} START Traefik Service              |";
+                echo -e "|   ${BOLD}2)${NC} STOP Traefik Service               |";
+                echo -e "|   ${BOLD}3)${NC} RESTART Traefik Service            |";
+                echo -e "|   ${BOLD}4)${NC} Show Traefik Service STATUS        |";
+                echo "|-----------------------------------------|";
+                echo -e "|   ${BOLD}5)${NC} View Traefik Log (traefik.log)     |";
+                echo -e "|   ${BOLD}6)${NC} View Access Log (access.log)       |";
+                echo -e "|   ${BOLD}7)${NC} View Systemd Journal Log (traefik) |";
+                echo -e "|   ${BOLD}8)${NC} View IP Access Log (...)           |";
+                echo -e "|      ${YELLOW}(${IP_LOG_FILE})${NC}      |";
+                echo -e "|   ${BOLD}9)${NC} View Autobackup Log (File)         |";
+                echo -e "|  ${BOLD}10)${NC} View Autobackup Log (Journal)      |";
+                echo -e "|  ${BOLD}11)${NC} View IP Logger Service Log (Jrnl)  |";
                 # Auto-Pull Log removed
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-11]: " sub_choice # Range adjusted
+                echo "|-----------------------------------------|";
+                echo -e "|   ${BOLD}0)${NC} Back                               |";
+                echo "+-----------------------------------------+";
+                read -p "Choice [0-11]: " sub_choice # Range adjusted
                 case "$sub_choice" in # Quote sub_choice
                      1) manage_service "start" ;; 2) manage_service "stop" ;; 3) manage_service "restart" ;; 4) manage_service "status" ;;
                      5) view_logs "traefik" ;; 6) view_logs "access" ;; 7) view_logs "journal" ;; 8) view_logs "ip_access" ;;
@@ -2158,27 +2309,36 @@ if ! $non_interactive_mode; then
                      0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             5) # --- Backup & Restore Submenu ---
                  clear; print_header "Backup & Restore";
-                 echo " 1) Create Configuration Backup";
-                 echo " 2) Restore Backup ${YELLOW}(CAUTION!)${NC}";
-                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-2]: " sub_choice
+                 echo -e "|   ${BOLD}1)${NC} Create Configuration Backup        |";
+                 echo -e "|   ${BOLD}2)${NC} Restore Backup ${YELLOW}(CAUTION!)${NC}       |";
+                 echo "|-----------------------------------------|";
+                 echo -e "|   ${BOLD}0)${NC} Back                               |";
+                 echo "+-----------------------------------------+";
+                 read -p "Choice [0-2]: " sub_choice
                  case "$sub_choice" in 1) backup_traefik false ;; 2) restore_traefik ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;; # Explicitly pass false
             6) # --- Diagnostics & Info Submenu ---
                 clear; print_header "Diagnostics & Info";
-                echo " 1) Show Installed Traefik Version";
-                echo " 2) Check Listening Ports (ss)";
-                echo " 3) Test Backend Connectivity";
-                echo " 4) Show Active Config (API/jq)";
-                echo " 5) Perform Health Check";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-5]: " sub_choice
+                echo -e "|   ${BOLD}1)${NC} Show Installed Traefik Version     |";
+                echo -e "|   ${BOLD}2)${NC} Check Listening Ports (ss)         |";
+                echo -e "|   ${BOLD}3)${NC} Test Backend Connectivity          |";
+                echo -e "|   ${BOLD}4)${NC} Show Active Config (API/jq)        |";
+                echo -e "|   ${BOLD}5)${NC} Perform Health Check               |";
+                echo "|-----------------------------------------|";
+                echo -e "|   ${BOLD}0)${NC} Back                               |";
+                echo "+-----------------------------------------+";
+                read -p "Choice [0-5]: " sub_choice
                 case "$sub_choice" in 1) show_traefik_version ;; 2) check_listening_ports ;; 3) test_backend_connectivity ;; 4) show_active_config ;; 5) health_check ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             7) # --- Automation Submenu ---
                 clear; print_header "Automation";
-                echo " 1) Setup/Modify Automatic Backup ${GREEN}(Implemented)${NC}";
-                echo " 2) Remove Automatic Backup ${GREEN}(Implemented)${NC}";
-                echo " 3) Setup Dedicated IP Logging ${GREEN}(Implemented)${NC}";
-                echo " 4) Remove Dedicated IP Logging ${GREEN}(Implemented)${NC}";
+                echo -e "|   ${BOLD}1)${NC} Setup/Modify Auto Backup ${GREEN}(Impl)${NC}   |";
+                echo -e "|   ${BOLD}2)${NC} Remove Automatic Backup ${GREEN}(Impl)${NC}    |";
+                echo -e "|   ${BOLD}3)${NC} Setup Dedicated IP Logging ${GREEN}(Impl)${NC} |";
+                echo -e "|   ${BOLD}4)${NC} Remove Dedicated IP Log ${GREEN}(Impl)${NC}  |";
                 # Auto-Pull removed
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-4]: " sub_choice # Range adjusted
+                echo "|-----------------------------------------|";
+                echo -e "|   ${BOLD}0)${NC} Back                               |";
+                echo "+-----------------------------------------+";
+                read -p "Choice [0-4]: " sub_choice # Range adjusted
                 case "$sub_choice" in # Quote sub_choice
                     1) setup_autobackup ;;
                     2) remove_autobackup ;;
@@ -2190,10 +2350,13 @@ if ! $non_interactive_mode; then
                 esac ;;
             8) # --- Maintenance & Updates Submenu ---
                  clear; print_header "Maintenance & Updates";
-                 echo " 1) Check for New Traefik Version";
-                 echo " 2) Update Traefik Binary ${YELLOW}(RISK!)${NC}";
-                 echo " 3) Check Certificate Expiry (< 14 Days)";
-                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-3]: " sub_choice
+                 echo -e "|   ${BOLD}1)${NC} Check for New Traefik Version      |";
+                 echo -e "|   ${BOLD}2)${NC} Update Traefik Binary ${YELLOW}(RISK!)${NC}   |";
+                 echo -e "|   ${BOLD}3)${NC} Check Cert Expiry (< 14 Days)    |";
+                 echo "|-----------------------------------------|";
+                 echo -e "|   ${BOLD}0)${NC} Back                               |";
+                 echo "+-----------------------------------------+";
+                 read -p "Choice [0-3]: " sub_choice
                  case "$sub_choice" in # Quote sub_choice
                     1) check_traefik_updates ;;
                     2) update_traefik_binary ;;
@@ -2201,7 +2364,7 @@ if ! $non_interactive_mode; then
                     0) ;;
                     *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             9) # --- Uninstall ---
-                 uninstall_traefik ;;
+                 uninstall_traefik ;; # This function has its own prompts, no submenu needed.
             0) # --- Exit Script ---
                 echo "Exiting script. Goodbye!"; exit 0 ;;
             *) # --- Invalid Main Menu Choice ---
@@ -2210,11 +2373,24 @@ if ! $non_interactive_mode; then
 
         # Pause before showing main menu again unless exiting or returning from submenu (choice 0)
         if [[ "$main_choice" != "0" ]]; then
-            # Only pause if an action was selected in the submenu (choice > 0) or main choice was invalid
-            # Also check if the main choice itself was valid for the top level menu (1-9)
-            if [[ "$sub_choice" -gt 0 ]] || ! [[ "$main_choice" =~ ^[1-9]$ ]]; then # Range adjusted
-                 # Don't pause if the submenu choice was 0 (Back)
-                 if [[ "$sub_choice" -ne 0 ]]; then
+            # Only pause if an action was selected in the submenu (sub_choice is not 0 and not -1 which means it was used)
+            # or if the main choice itself was invalid.
+            # An invalid main_choice would result in sub_choice remaining -1.
+            # A direct action from main menu (like 9) also means sub_choice is -1.
+            if [[ "$sub_choice" -gt 0 ]] || ( [[ "$sub_choice" -eq -1 ]] && ! [[ "$main_choice" =~ ^[0-8]$ ]] ); then
+                 # Don't pause if the submenu choice was 0 (Back) or if it was a direct main menu action (like 9)
+                 # The second part of the OR condition:
+                 # sub_choice is -1 (meaning no submenu was entered or submenu choice was 0 and then reset)
+                 # AND main_choice was NOT one that leads to a submenu (0-8 leads to submenus or exit)
+                 # This covers invalid main_choice.
+                 # Main choices 1-8 lead to submenus. Main choice 9 is direct. Main choice 0 is direct.
+                 # So, if sub_choice is > 0, it means a submenu action was taken.
+                 # If sub_choice is -1, it means either a direct main menu action (like 9) or invalid main menu choice.
+                 # We want to pause for invalid main menu choice.
+                 # We also want to pause if a submenu action (sub_choice > 0) was taken.
+                 # We do NOT want to pause if sub_choice was 0 (Back from submenu).
+                 # We do NOT want to pause for direct main menu action 9.
+                 if [[ "$sub_choice" -ne 0 ]] && [[ "$main_choice" -ne 9 ]]; then
                      echo ""; read -p "... Press Enter for main menu ..." dummy_var;
                  fi
             fi
