@@ -2029,6 +2029,299 @@ check_insecure_api() {
 }
 
 
+#===============================================================================
+# Function: Run Comprehensive Diagnostics
+#===============================================================================
+run_diagnostics() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Comprehensive Diagnostics Report${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+
+    echo -e "${BLUE}Running a series of checks...${NC}"
+    echo "=================================================="
+
+    # 1. Health Check
+    health_check
+
+    # 2. Listening Ports
+    check_listening_ports
+
+    # 3. Certificate Expiry
+    check_certificate_expiry
+
+    # 4. Insecure API Check
+    check_insecure_api
+
+    echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Diagnostics Complete${NC}"; echo -e "${MAGENTA}==================================================${NC}"
+    return 0
+}
+
+#===============================================================================
+# Function: Setup DNS Validation for Let's Encrypt
+#===============================================================================
+setup_dns_validation() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Setup DNS Validation (Let's Encrypt)${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    if [[ ! -f "$STATIC_CONFIG_FILE" ]]; then echo -e "${RED}ERROR: Static config (${STATIC_CONFIG_FILE}) not found.${NC}" >&2; return 1; fi
+
+    echo -e "${YELLOW}WARNING: This will modify your static configuration (${STATIC_CONFIG_FILE}) and requires a Traefik restart.${NC}";
+    echo -e "${BLUE}This will configure Traefik to use a DNS challenge for obtaining wildcard certificates (*.yourdomain.com).${NC}";
+    echo "A list of supported providers can be found here: https://doc.traefik.io/traefik/https/acme/#providers";
+    echo "--------------------------------------------------";
+
+    read -p "Enter your DNS provider (e.g., 'cloudflare', 'ovh', 'digitalocean'): " DNS_PROVIDER;
+    while [[ -z "$DNS_PROVIDER" ]]; do echo -e "${RED}ERROR: DNS provider cannot be empty.${NC}" >&2; read -p "DNS Provider: " DNS_PROVIDER; done
+
+    echo "Enter the required environment variables for your provider.";
+    echo "For example, for Cloudflare, you might need 'CLOUDFLARE_EMAIL' and 'CLOUDFLARE_API_KEY'.";
+    echo "Enter the variables one by one. Press Enter on an empty line to finish.";
+
+    local env_vars=()
+    while true; do
+        read -p "Environment variable (e.g., 'CF_API_KEY=your_key'): " env_var;
+        if [[ -z "$env_var" ]]; then
+            break;
+        fi
+        env_vars+=("$env_var")
+    done
+
+    echo "--------------------------------------------------";
+    echo "The following DNS provider will be configured: ${DNS_PROVIDER}";
+    echo "The following environment variables will be set in the traefik.service file:";
+    for var in "${env_vars[@]}"; do
+        echo " - ${var%%=*}";
+    done
+    echo "--------------------------------------------------";
+
+    local confirm_setup=false
+    ask_confirmation "Are you sure you want to proceed?" confirm_setup
+    if ! $confirm_setup; then echo "Aborting."; return 1; fi
+
+    echo "--- Updating ${STATIC_CONFIG_FILE} ---";
+    local temp_yaml=$(mktemp "/tmp/traefik_static_config_dns_XXXXXX.yaml")
+    if ! sudo cp "${STATIC_CONFIG_FILE}" "${temp_yaml}"; then echo -e "${RED}ERROR: Could not copy static config.${NC}" >&2; rm -f "$temp_yaml"; return 1; fi
+    if ! sudo chown "$(whoami):$(whoami)" "${temp_yaml}"; then echo -e "${YELLOW}WARNING: Could not take ownership of temporary file.${NC}" >&2; fi
+
+    # Use awk to replace httpChallenge with dnsChallenge
+    awk '
+    BEGIN { in_resolver = 0; processed = 0; }
+    /certificatesResolvers:/ { in_resolver = 1; }
+    in_resolver && /httpChallenge:/ && !processed {
+        print "      dnsChallenge:";
+        print "        provider: '"${DNS_PROVIDER}"'";
+        processed = 1;
+        next;
+    }
+    in_resolver && /entryPoint:/ && processed { next; }
+    { print; }
+    ' "${temp_yaml}" > "${temp_yaml}.new"
+
+    if ! sudo mv "${temp_yaml}.new" "${STATIC_CONFIG_FILE}"; then
+         echo -e "${RED}ERROR: Could not update ${STATIC_CONFIG_FILE}.${NC}" >&2; return 1;
+    fi
+    sudo chmod 644 "${STATIC_CONFIG_FILE}"
+
+    echo "--- Updating ${TRAEFIK_SERVICE_FILE} ---";
+    for var in "${env_vars[@]}"; do
+        if ! sudo sed -i "/\\[Service\\]/a Environment=${var}" "${TRAEFIK_SERVICE_FILE}"; then
+            echo -e "${RED}ERROR: Could not add environment variable ${var%%=*} to ${TRAEFIK_SERVICE_FILE}.${NC}" >&2;
+            return 1
+        fi
+    done
+
+    echo -e "${GREEN}Configuration updated successfully.${NC}";
+    echo -e "${YELLOW}Reloading systemd daemon and restarting Traefik to apply changes...${NC}";
+    sudo systemctl daemon-reload
+    manage_service "restart"
+
+    echo "==================================================";
+    return 0
+}
+
+#===============================================================================
+# Function: Update All Dependencies
+#===============================================================================
+update_all_dependencies() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Update All Dependencies${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    echo -e "${BLUE}This will update all required apt packages...${NC}";
+    if ! sudo apt-get update; then
+        echo -e "${RED}ERROR: apt-get update failed.${NC}" >&2;
+        return 1
+    fi
+
+    local dependencies=( "jq:jq" "curl:curl" "htpasswd:apache2-utils" "nc:netcat-openbsd" "openssl:openssl" "stat:coreutils" "sed:sed" "grep:grep" "awk:gawk" "tar:tar" "find:findutils" "ss:iproute2" "yamllint:yamllint")
+    local pkgs_to_install=()
+    for item in "${dependencies[@]}"; do
+        local pkg="${item##*:}"
+        pkgs_to_install+=("$pkg")
+    done
+
+    local install_list=$(echo "${pkgs_to_install[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    echo -e "${BLUE}Updating the following packages: ${install_list}...${NC}";
+    if ! sudo apt-get install -y --only-upgrade $install_list; then
+        echo -e "${RED}ERROR: Could not update packages.${NC}" >&2;
+        return 1
+    fi
+
+    echo -e "${GREEN}All dependencies updated successfully.${NC}";
+    echo "==================================================";
+    return 0
+}
+
+#===============================================================================
+# Function: Restore Single Service from Backup
+#===============================================================================
+restore_single_service() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Restore Single Service from Backup${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if [ ! -d "$BACKUP_DIR" ]; then echo -e "${RED}ERROR: Backup directory ${BACKUP_DIR} not found.${NC}" >&2; return 1; fi
+
+    echo "Available backups (newest first):"; local files=(); local i=1; local file
+    while IFS= read -r -d $'\0' file; do files+=("$(basename "$file")"); echo -e "    ${BOLD}${i})${NC} $(basename "$file") ($(stat -c %y "$file" 2>/dev/null | cut -d'.' -f1))"; ((i++)); done < <(find "${BACKUP_DIR}" -maxdepth 1 -name 'traefik-backup-*.tar.gz' -type f -printf '%T@ %p\0' | sort -znr | cut -z -d' ' -f2-)
+    if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}No backups found.${NC}"; return 1; fi; echo -e "    ${BOLD}0)${NC} Back"; echo "--------------------------------------------------"; local choice; read -p "Number of the backup to restore from [0-${#files[@]}]: " choice
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 0 ]] || [[ "$choice" -gt ${#files[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; return 1; fi; if [[ "$choice" -eq 0 ]]; then echo "Aborting."; return 1; fi
+    local idx=$((choice - 1)); local fname="${files[$idx]}"; local fpath="${BACKUP_DIR}/${fname}";
+
+    echo "--------------------------------------------------";
+    echo "Selected backup: ${fname}";
+    echo "Listing services in backup...";
+    local services=()
+    while IFS= read -r service; do services+=("$service"); done < <(tar -tzf "${fpath}" --wildcards './dynamic_conf/*.yml' | sed -e 's|./dynamic_conf/||' -e 's|.yml||')
+
+    if [ ${#services[@]} -eq 0 ]; then echo -e "${YELLOW}No services found in this backup.${NC}"; return 1; fi
+
+    local i=1
+    for service in "${services[@]}"; do
+        echo -e "    ${BOLD}${i})${NC} ${service}"
+        ((i++))
+    done
+    echo -e "    ${BOLD}0)${NC} Back";
+    echo "--------------------------------------------------";
+    read -p "Number of the service to restore [0-${#services[@]}]: " service_choice
+    if ! [[ "$service_choice" =~ ^[0-9]+$ ]] || [[ "$service_choice" -lt 0 ]] || [[ "$service_choice" -gt ${#services[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; return 1; fi; if [[ "$service_choice" -eq 0 ]]; then echo "Aborting."; return 1; fi
+
+    local service_idx=$((service_choice - 1)); local service_name="${services[$service_idx]}";
+    local service_file_path="./dynamic_conf/${service_name}.yml"
+    local restore_path="${TRAEFIK_DYNAMIC_CONF_DIR}/${service_name}.yml"
+
+    echo "--------------------------------------------------";
+    echo "Restoring '${service_name}' from '${fname}' to '${restore_path}'...";
+    local restore_confirmed=false
+    ask_confirmation "Are you sure you want to overwrite the current configuration for '${service_name}'?" restore_confirmed
+    if ! $restore_confirmed; then echo "Aborting."; return 1; fi
+
+    if ! tar -xzf "${fpath}" -C /tmp/ "${service_file_path}"; then
+        echo -e "${RED}ERROR: Could not extract '${service_file_path}' from backup.${NC}" >&2;
+        return 1
+    fi
+
+    if ! sudo mv "/tmp/${service_file_path}" "${restore_path}"; then
+        echo -e "${RED}ERROR: Could not move extracted file to '${restore_path}'.${NC}" >&2;
+        return 1
+    fi
+
+    echo -e "${GREEN}Service '${service_name}' restored successfully.${NC}";
+    echo "==================================================";
+    return 0
+}
+
+#===============================================================================
+# Function: Display Live Metrics for a Service
+#===============================================================================
+display_live_metrics() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Display Live Metrics for a Service${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if ! is_traefik_installed; then echo -e "${RED}ERROR: Traefik not installed.${NC}" >&2; return 1; fi
+    if ! command -v curl &> /dev/null || ! command -v jq &> /dev/null; then echo -e "${RED}ERROR: 'curl' and 'jq' required.${NC}" >&2; check_dependencies; return 1; fi
+
+    local api_url="http://127.0.0.1:8080/api"
+    local api_insecure=false;
+    if sudo awk '/^api:/ {flag=1; next} /^[a-zA-Z#]+:/ {if (!/^\s*#/) flag=0} flag && /^\s*insecure:\s*true/' "${STATIC_CONFIG_FILE}" 2>/dev/null | grep -q 'true'; then
+        api_insecure=true;
+    fi
+
+    if ! $api_insecure; then
+        echo -e "${RED}ERROR: API is not in insecure mode ('insecure: false'). This function requires API access.${NC}" >&2;
+        return 1
+    fi
+
+    echo "Fetching services from Traefik API...";
+    local services_json=$(curl -s "${api_url}/http/services")
+    if [ -z "$services_json" ]; then
+        echo -e "${RED}ERROR: Could not fetch services from API.${NC}" >&2;
+        return 1
+    fi
+
+    local services=()
+    while IFS= read -r service; do services+=("$service"); done < <(echo "$services_json" | jq -r '.[].name')
+
+    if [ ${#services[@]} -eq 0 ]; then echo -e "${YELLOW}No services found.${NC}"; return 1; fi
+
+    local i=1
+    for service in "${services[@]}"; do
+        echo -e "    ${BOLD}${i})${NC} ${service}"
+        ((i++))
+    done
+    echo -e "    ${BOLD}0)${NC} Back";
+    echo "--------------------------------------------------";
+    read -p "Number of the service to monitor [0-${#services[@]}]: " service_choice
+    if ! [[ "$service_choice" =~ ^[0-9]+$ ]] || [[ "$service_choice" -lt 0 ]] || [[ "$service_choice" -gt ${#services[@]} ]]; then echo -e "${RED}ERROR: Invalid selection.${NC}" >&2; return 1; fi; if [[ "$service_choice" -eq 0 ]]; then echo "Aborting."; return 1; fi
+
+    local service_idx=$((service_choice - 1)); local service_name="${services[$service_idx]}";
+
+    echo "--------------------------------------------------";
+    echo "Monitoring metrics for service: ${service_name}";
+    echo "Press Ctrl+C to stop.";
+    echo "--------------------------------------------------";
+
+    while true; do
+        local metrics=$(curl -s "${api_url}/http/services/${service_name}")
+        local server_status=$(echo "$metrics" | jq -r '.serverStatus')
+        local used_server=$(echo "$metrics" | jq -r '.usedServer')
+
+        echo -ne "Service: ${service_name} | Status: ${server_status} | Used Server: ${used_server} \r"
+        sleep 2
+    done
+
+    return 0
+}
+
+#===============================================================================
+# Function: Manage Firewall Rules (UFW)
+#===============================================================================
+manage_firewall_rules() {
+    echo ""; echo -e "${MAGENTA}==================================================${NC}"; echo -e "${BOLD} Manage Firewall Rules (UFW)${NC}"; echo -e "${MAGENTA}==================================================${NC}";
+    if ! command -v ufw &> /dev/null; then
+        echo -e "${RED}ERROR: 'ufw' command not found. This function requires UFW to be installed.${NC}" >&2;
+        echo -e "${YELLOW}To install UFW, run: sudo apt-get install ufw${NC}";
+        return 1
+    fi
+
+    while true; do
+        clear; print_header "Firewall Management (UFW)";
+        echo -e "| Firewall Status: $(sudo ufw status | grep "Status:" | awk '{print $2}')"
+        echo "+-----------------------------------------+"
+        echo -e "|   ${BOLD}1)${NC} Allow Port 80 (HTTP)             |"
+        echo -e "|   ${BOLD}2)${NC} Allow Port 443 (HTTPS)            |"
+        echo -e "|   ${BOLD}3)${NC} Deny Port 80                      |"
+        echo -e "|   ${BOLD}4)${NC} Deny Port 443                     |"
+        echo -e "|   ${BOLD}5)${NC} Enable Firewall                   |"
+        echo -e "|   ${BOLD}6)${NC} Disable Firewall                  |"
+        echo -e "|   ${BOLD}7)${NC} View Firewall Status              |"
+        echo -e "|   ${BOLD}0)${NC} Back to Main Menu                |"
+        echo "+-----------------------------------------+"; read -p "Choice [0-7]: " fw_choice
+
+        case "$fw_choice" in
+            1) sudo ufw allow 80/tcp && echo -e "${GREEN}Port 80 (HTTP) allowed.${NC}" ;;
+            2) sudo ufw allow 443/tcp && echo -e "${GREEN}Port 443 (HTTPS) allowed.${NC}" ;;
+            3) sudo ufw deny 80/tcp && echo -e "${YELLOW}Port 80 (HTTP) denied.${NC}" ;;
+            4) sudo ufw deny 443/tcp && echo -e "${YELLOW}Port 443 (HTTPS) denied.${NC}" ;;
+            5) sudo ufw enable && echo -e "${GREEN}Firewall enabled.${NC}" ;;
+            6) sudo ufw disable && echo -e "${YELLOW}Firewall disabled.${NC}" ;;
+            7) sudo ufw status verbose ;;
+            0) return 0 ;;
+            *) echo -e "${RED}ERROR: Invalid choice.${NC}" >&2 ;;
+        esac; echo ""; read -p "... Press Enter to continue ..."
+    done
+}
+
 # --- MAIN MENU LOGIC ---
 # (Must be after all function definitions)
 
@@ -2040,7 +2333,7 @@ if $non_interactive_mode && [[ "$1" == "--run-backup" ]]; then
         # Execute the non-interactive backup and exit
         echo "[$(date +'%Y-%m-%d %H:%M:%S')] Running non-interactive backup via ${SCRIPT_PATH}..."
         backup_traefik true # Call the function with non-interactive flag
-        local exit_code=$?
+        exit_code=$?
         echo "[$(date +'%Y-%m-%d %H:%M:%S')] Non-interactive backup finished with exit code ${exit_code}."
         exit $exit_code
     else
@@ -2058,43 +2351,43 @@ if ! $non_interactive_mode; then
     while true; do
         print_header "Main Menu - Traefik Management"
 
-        # Menu items - Renumbered after removing Git
-        echo -e "| ${CYAN}1) Installation & Initial Setup    ${NC} |"
-        echo -e "| ${CYAN}2) Configuration & Routes          ${NC} |"
+        # Menu items - Reorganized for new functions
+        echo -e "| ${CYAN}1) Installation & Setup            ${NC} |"
+        echo -e "| ${CYAN}2) Configuration & Services        ${NC} |"
         echo -e "| ${CYAN}3) Security & Certificates         ${NC} |"
-        echo -e "| ${CYAN}4) Service & Logs                  ${NC} |"
+        echo -e "| ${CYAN}4) Service, Logs & Metrics         ${NC} |"
         echo -e "| ${CYAN}5) Backup & Restore                ${NC} |"
-        echo -e "| ${CYAN}6) Diagnostics & Info              ${NC} |"
-        echo -e "| ${CYAN}7) Automation                      ${NC} |"
-        echo -e "| ${CYAN}8) Maintenance & Updates           ${NC} |"
+        echo -e "| ${CYAN}6) Diagnostics & Health            ${NC} |"
+        echo -e "| ${CYAN}7) Automation & Maintenance        ${NC} |"
+        echo -e "| ${CYAN}8) Firewall & System               ${NC} |"
         echo "|-----------------------------------------|"
-        echo -e "| ${BOLD}9) Uninstall Traefik ${RED}(RISK!)      ${NC} |" # Uninstall moved to top level
+        echo -e "| ${BOLD}9) Uninstall Traefik ${RED}(RISK!)      ${NC} |"
         echo "|-----------------------------------------|"
         echo -e "| ${BOLD}0) Exit Script                     ${NC} |"
         echo "+-----------------------------------------+";
-        read -p "Your choice [0-9]: " main_choice # Range adjusted
+        read -p "Your choice [0-9]: " main_choice
 
         local sub_choice=-1 # Reset sub_choice
 
-        case "$main_choice" in # Quote main_choice
-            1) # --- Install / Update Submenu ---
-                clear; print_header "Installation & Initial Setup";
+        case "$main_choice" in
+            1) # --- Installation & Setup ---
+                clear; print_header "Installation & Setup";
                 echo " 1) Install / Overwrite Traefik";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-1]: " sub_choice
-                case "$sub_choice" in 1) install_traefik ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            2) # --- Config & Routes Submenu ---
-                clear; print_header "Configuration & Routes";
+                echo " 2) Setup DNS Validation (for Wildcard Certs)";
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-2]: " sub_choice
+                case "$sub_choice" in 1) install_traefik ;; 2) setup_dns_validation ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+            2) # --- Configuration & Services ---
+                clear; print_header "Configuration & Services";
                 echo " 1) Add New Service / Route";
                 echo " 2) Modify Service / Route";
                 echo " 3) Remove Service / Route";
-                echo " 4) Check Static Config (Hint V3)";
-                echo " 5) Edit Static Config (${STATIC_CONFIG_FILE})";
-                echo " 6) Edit Middleware Config (${MIDDLEWARES_FILE})";
-                echo " 7) Edit EntryPoints (${STATIC_CONFIG_FILE})";
-                echo " 8) Edit Global TLS Options (${MIDDLEWARES_FILE})"; # Pointing to middlewares file now
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-8]: " sub_choice
-                case "$sub_choice" in 1) add_service ;; 2) modify_service ;; 3) remove_service ;; 4) check_static_config ;; 5) edit_static_config ;; 6) edit_middlewares_config ;; 7) edit_entrypoints ;; 8) edit_tls_options ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            3) # --- Security & Certificates Submenu ---
+                echo " 4) Edit Static Config (${STATIC_CONFIG_FILE})";
+                echo " 5) Edit Middleware Config (${MIDDLEWARES_FILE})";
+                echo " 6) Edit EntryPoints (${STATIC_CONFIG_FILE})";
+                echo " 7) Edit Global TLS Options (${MIDDLEWARES_FILE})";
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-7]: " sub_choice
+                case "$sub_choice" in 1) add_service ;; 2) modify_service ;; 3) remove_service ;; 4) edit_static_config ;; 5) edit_middlewares_config ;; 6) edit_entrypoints ;; 7) edit_tls_options ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+            3) # --- Security & Certificates ---
                 clear; print_header "Security & Certificates";
                 echo " 1) Manage Dashboard Users";
                 echo " 2) Show Certificate Details (ACME)";
@@ -2104,8 +2397,8 @@ if ! $non_interactive_mode; then
                 echo " 6) Add Plugin (Experimental)";
                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-6]: " sub_choice
                 case "$sub_choice" in 1) manage_dashboard_users ;; 2) show_certificate_info ;; 3) check_certificate_expiry ;; 4) check_insecure_api ;; 5) generate_fail2ban_config ;; 6) install_plugin ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            4) # --- Service & Logs Submenu ---
-                clear; print_header "Service & Logs";
+            4) # --- Service, Logs & Metrics ---
+                clear; print_header "Service, Logs & Metrics";
                 echo " 1) START Traefik Service";
                 echo " 2) STOP Traefik Service";
                 echo " 3) RESTART Traefik Service";
@@ -2113,62 +2406,41 @@ if ! $non_interactive_mode; then
                 echo " 5) View Traefik Log (traefik.log)";
                 echo " 6) View Access Log (access.log)";
                 echo " 7) View Systemd Journal Log (traefik)";
-                echo " 8) View IP Access Log (${IP_LOG_FILE})";
-                echo " 9) View Autobackup Log (File)";
-                echo "10) View Autobackup Log (Journal)";
-                echo "11) View IP Logger Service Log (Journal)";
-                # Auto-Pull Log removed
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-11]: " sub_choice # Range adjusted
-                case "$sub_choice" in # Quote sub_choice
-                     1) manage_service "start" ;; 2) manage_service "stop" ;; 3) manage_service "restart" ;; 4) manage_service "status" ;;
-                     5) view_logs "traefik" ;; 6) view_logs "access" ;; 7) view_logs "journal" ;; 8) view_logs "ip_access" ;;
-                     9) view_logs "autobackup_file" ;; 10) view_logs "autobackup" ;; 11) view_logs "ip_logger" ;;
-                     # 12 removed
-                     0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            5) # --- Backup & Restore Submenu ---
+                echo " 8) Display Live Metrics for a Service";
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-8]: " sub_choice
+                case "$sub_choice" in 1) manage_service "start" ;; 2) manage_service "stop" ;; 3) manage_service "restart" ;; 4) manage_service "status" ;; 5) view_logs "traefik" ;; 6) view_logs "access" ;; 7) view_logs "journal" ;; 8) display_live_metrics ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+            5) # --- Backup & Restore ---
                  clear; print_header "Backup & Restore";
-                 echo " 1) Create Configuration Backup";
-                 echo " 2) Restore Backup ${YELLOW}(CAUTION!)${NC}";
-                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-2]: " sub_choice
-                 case "$sub_choice" in 1) backup_traefik false ;; 2) restore_traefik ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;; # Explicitly pass false
-            6) # --- Diagnostics & Info Submenu ---
-                clear; print_header "Diagnostics & Info";
-                echo " 1) Show Installed Traefik Version";
-                echo " 2) Check Listening Ports (ss)";
-                echo " 3) Test Backend Connectivity";
-                echo " 4) Show Active Config (API/jq)";
-                echo " 5) Perform Health Check";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-5]: " sub_choice
-                case "$sub_choice" in 1) show_traefik_version ;; 2) check_listening_ports ;; 3) test_backend_connectivity ;; 4) show_active_config ;; 5) health_check ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            7) # --- Automation Submenu ---
-                clear; print_header "Automation";
-                echo " 1) Setup/Modify Automatic Backup ${GREEN}(Implemented)${NC}";
-                echo " 2) Remove Automatic Backup ${GREEN}(Implemented)${NC}";
-                echo " 3) Setup Dedicated IP Logging ${GREEN}(Implemented)${NC}";
-                echo " 4) Remove Dedicated IP Logging ${GREEN}(Implemented)${NC}";
-                # Auto-Pull removed
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-4]: " sub_choice # Range adjusted
-                case "$sub_choice" in # Quote sub_choice
-                    1) setup_autobackup ;;
-                    2) remove_autobackup ;;
-                    3) setup_ip_logging ;;
-                    4) remove_ip_logging ;;
-                    # 5, 6 removed
-                    0) ;;
-                    *) echo -e "${RED}Invalid choice.${NC}" >&2 ;;
-                esac ;;
-            8) # --- Maintenance & Updates Submenu ---
-                 clear; print_header "Maintenance & Updates";
-                 echo " 1) Check for New Traefik Version";
-                 echo " 2) Update Traefik Binary ${YELLOW}(RISK!)${NC}";
-                 echo " 3) Check Certificate Expiry (< 14 Days)";
+                 echo " 1) Create Full Backup";
+                 echo " 2) Restore Full Backup ${YELLOW}(CAUTION!)${NC}";
+                 echo " 3) Restore Single Service from Backup";
                  echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-3]: " sub_choice
-                 case "$sub_choice" in # Quote sub_choice
-                    1) check_traefik_updates ;;
-                    2) update_traefik_binary ;;
-                    3) check_certificate_expiry ;;
-                    0) ;;
-                    *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+                 case "$sub_choice" in 1) backup_traefik false ;; 2) restore_traefik ;; 3) restore_single_service ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+            6) # --- Diagnostics & Health ---
+                clear; print_header "Diagnostics & Health";
+                echo " 1) Run Comprehensive Diagnostics";
+                echo " 2) Show Installed Traefik Version";
+                echo " 3) Check Listening Ports (ss)";
+                echo " 4) Test Backend Connectivity";
+                echo " 5) Show Active Config (API/jq)";
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-5]: " sub_choice
+                case "$sub_choice" in 1) run_diagnostics ;; 2) show_traefik_version ;; 3) check_listening_ports ;; 4) test_backend_connectivity ;; 5) show_active_config ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+            7) # --- Automation & Maintenance ---
+                clear; print_header "Automation & Maintenance";
+                echo " 1) Setup/Modify Automatic Backup";
+                echo " 2) Remove Automatic Backup";
+                echo " 3) Setup Dedicated IP Logging";
+                echo " 4) Remove Dedicated IP Logging";
+                echo " 5) Check for New Traefik Version";
+                echo " 6) Update Traefik Binary ${YELLOW}(RISK!)${NC}";
+                echo " 7) Update All Dependencies";
+                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-7]: " sub_choice
+                case "$sub_choice" in 1) setup_autobackup ;; 2) remove_autobackup ;; 3) setup_ip_logging ;; 4) remove_ip_logging ;; 5) check_traefik_updates ;; 6) update_traefik_binary ;; 7) update_all_dependencies ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
+            8) # --- Firewall & System ---
+                 clear; print_header "Firewall & System";
+                 echo " 1) Manage Firewall Rules (UFW)";
+                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-1]: " sub_choice
+                 case "$sub_choice" in 1) manage_firewall_rules ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
             9) # --- Uninstall ---
                  uninstall_traefik ;;
             0) # --- Exit Script ---
