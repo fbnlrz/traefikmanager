@@ -162,7 +162,7 @@ install_traefik() {
 
   echo -e "${BLUE}>>> [4/7] Creating ${STATIC_CONFIG_FILE}...${NC}";
   if ! sudo mkdir -p "$(dirname "${STATIC_CONFIG_FILE}")"; then echo -e "${RED}ERROR: Could not create config subdirectory.${NC}" >&2; return 1; fi # Ensure config dir exists
-  if ! sudo tee "${STATIC_CONFIG_FILE}" > /dev/null <<EOF
+  if cat <<EOF | sudo tee "${STATIC_CONFIG_FILE}" > /dev/null
 #-------------------------------------------------------------------------------
 # Main configuration for Traefik ${INSTALLED_VERSION} (Optimized)
 # Created on: $(date)
@@ -277,7 +277,7 @@ EOF
 
   echo -e "${BLUE}>>> [5/7] Creating dynamic base configs...${NC}"; echo " - ${MIDDLEWARES_FILE}...";
   if ! sudo mkdir -p "$(dirname "${MIDDLEWARES_FILE}")"; then echo -e "${RED}ERROR: Could not create dynamic config directory.${NC}" >&2; return 1; fi # Ensure dynamic_conf dir exists
-  if ! sudo tee "${MIDDLEWARES_FILE}" > /dev/null <<EOF
+  if cat <<EOF | sudo tee "${MIDDLEWARES_FILE}" > /dev/null
 #-------------------------------------------------------------------------------
 # Middleware Definitions & Global TLS Options
 # Created on: $(date)
@@ -332,7 +332,7 @@ EOF
   then echo -e "${GREEN} middlewares.yml OK.${NC}"; else echo -e "${RED}ERROR: Could not create ${MIDDLEWARES_FILE}.${NC}" >&2; return 1; fi
 
   echo " - ${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml...";
-  if ! sudo tee "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" > /dev/null <<EOF
+  if ! cat <<EOF | sudo tee "${TRAEFIK_DYNAMIC_CONF_DIR}/traefik_dashboard.yml" > /dev/null
 #-------------------------------------------------------------------------------
 # Dynamic configuration ONLY for the Traefik Dashboard
 # Created on: $(date)
@@ -362,7 +362,7 @@ EOF
   echo -e "${GREEN} Password protection OK.${NC}";
 
   echo -e "${BLUE}>>> [7/7] Creating Systemd Service...${NC}";
-  if ! sudo tee "${TRAEFIK_SERVICE_FILE}" > /dev/null <<EOF
+  if ! cat <<EOF | sudo tee "${TRAEFIK_SERVICE_FILE}" > /dev/null
 [Unit]
 Description=Traefik ${INSTALLED_VERSION} - Modern HTTP Reverse Proxy
 Documentation=https://doc.traefik.io/traefik/
@@ -459,7 +459,7 @@ add_service() {
     # Ensure directory exists before writing
     if ! sudo mkdir -p "$(dirname "$CONFIG_FILE")"; then echo -e "${RED}ERROR: Could not create directory for config (${TRAEFIK_DYNAMIC_CONF_DIR}).${NC}" >&2; return 1; fi
 
-    if ! sudo tee "$CONFIG_FILE" > /dev/null <<EOF
+    if ! cat <<EOF | sudo tee "$CONFIG_FILE" > /dev/null
 #-------------------------------------------------------------------------------
 # Dynamic configuration for Service: ${SERVICE_NAME}
 # Domain: ${FULL_DOMAIN}
@@ -637,7 +637,7 @@ setup_autobackup() {
 
     # --- Service File Content ---
     echo -e "${BLUE}Creating Systemd service file (${AUTOBACKUP_SERVICE})...${NC}"
-    if ! sudo tee "$service_file" > /dev/null <<EOF
+    if ! cat <<EOF | sudo tee "$service_file" > /dev/null
 [Unit]
 Description=Traefik Automatic Backup Service
 Documentation=file://${SCRIPT_PATH}
@@ -670,7 +670,7 @@ EOF
     echo -e "${CYAN}INFO: Backup will run daily by default (with up to ${random_delay} delay).${NC}"
     echo -e "${CYAN}      You can adjust the schedule later in '${timer_file}' under '[Timer] OnCalendar='.${NC}"
 
-    if ! sudo tee "$timer_file" > /dev/null <<EOF
+    if ! cat <<EOF | sudo tee "$timer_file" > /dev/null
 [Unit]
 Description=Traefik Automatic Backup Timer (runs ${AUTOBACKUP_SERVICE})
 Documentation=file://${SCRIPT_PATH}
@@ -811,7 +811,7 @@ setup_ip_logging() {
 
     # --- Helper Script Content ---
     echo -e "${BLUE}Creating helper script (${IPLOGGER_HELPER_SCRIPT})...${NC}"
-    if ! sudo tee "$IPLOGGER_HELPER_SCRIPT" > /dev/null <<EOF
+    if ! cat <<EOF | sudo tee "$IPLOGGER_HELPER_SCRIPT" > /dev/null
 #!/bin/bash
 # Helper script to extract client IPs from Traefik JSON Access Logs
 
@@ -867,7 +867,7 @@ EOF
 
     # --- Service File Content ---
     echo -e "${BLUE}Creating Systemd service file (${IPLOGGER_SERVICE})...${NC}"
-    if ! sudo tee "$service_file" > /dev/null <<EOF
+    if ! cat <<EOF | sudo tee "$service_file" > /dev/null
 [Unit]
 Description=Traefik IP Address Logger Service (runs helper script)
 Documentation=file://${SCRIPT_PATH}
@@ -900,7 +900,7 @@ EOF
     echo -e "${CYAN}INFO: IP Logging will run every 15 minutes by default.${NC}"
     echo -e "${CYAN}      You can adjust the schedule later in '${timer_file}'.${NC}"
 
-    if ! sudo tee "$timer_file" > /dev/null <<EOF
+    if ! cat <<EOF | sudo tee "$timer_file" > /dev/null
 [Unit]
 Description=Traefik IP Address Logger Timer (runs ${IPLOGGER_SERVICE})
 Documentation=file://${SCRIPT_PATH}
@@ -925,7 +925,7 @@ EOF
 
     # --- Logrotate Configuration ---
     echo -e "${BLUE}Creating Logrotate configuration (${IPLOGGER_LOGROTATE_CONF})...${NC}"
-    if ! sudo tee "$IPLOGGER_LOGROTATE_CONF" > /dev/null <<EOF
+    if ! cat <<EOF | sudo tee "$IPLOGGER_LOGROTATE_CONF" > /dev/null
 ${IP_LOG_FILE} {
     daily
     rotate 7
