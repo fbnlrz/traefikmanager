@@ -146,9 +146,42 @@ install_traefik() {
   # Removed set -e to handle errors more explicitly
   print_header "Traefik Installation / Update"
   echo -e "${BLUE}INFO: Installs/updates Traefik.${NC}"; echo "--------------------------------------------------"
-  if is_traefik_installed; then local c=false; ask_confirmation "${YELLOW}WARNING: Traefik exists. Overwrite?${NC}" c; if ! $c; then echo "Aborting."; return 1; fi; echo -e "${YELLOW}INFO: Overwriting...${NC}"; fi
+
+  # Check for existing minimal/Proxmox configuration
+  local existing_email=""
+  if [[ -f "${STATIC_CONFIG_FILE}" ]]; then
+      # Try to extract email from existing config
+      existing_email=$(grep -oP 'email: "\K[^"]+' "${STATIC_CONFIG_FILE}" 2>/dev/null)
+      if [[ "$existing_email" == "foo@bar.com" ]]; then existing_email=""; fi # Ignore placeholder
+  fi
+
+  if is_traefik_installed; then
+      local c=false;
+      # Detect if it looks like a minimal install (e.g. insecure=true or no trustedIPs)
+      local is_minimal=false
+      if grep -q "insecure: true" "${STATIC_CONFIG_FILE}" 2>/dev/null; then is_minimal=true; fi
+
+      if $is_minimal; then
+          echo -e "${YELLOW}WARNING: Existing Traefik configuration seems minimal (e.g., insecure API).${NC}"
+          echo -e "${YELLOW}         It is recommended to upgrade to the optimized configuration.${NC}"
+          ask_confirmation "Upgrade configuration now? (Overwrites ${STATIC_CONFIG_FILE})" c
+      else
+          ask_confirmation "${YELLOW}WARNING: Traefik exists. Overwrite?${NC}" c
+      fi
+
+      if ! $c; then echo "Aborting."; return 1; fi;
+      echo -e "${YELLOW}INFO: Overwriting...${NC}";
+  fi
+
   read -p "Traefik version [${DEFAULT_TRAEFIK_VERSION}]: " TRAEFIK_VERSION; TRAEFIK_VERSION=${TRAEFIK_VERSION:-$DEFAULT_TRAEFIK_VERSION}; TRAEFIK_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//');
-  read -p "Email for Let's Encrypt: " LETSENCRYPT_EMAIL; while ! [[ "$LETSENCRYPT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; do echo -e "${RED}ERROR: Invalid email.${NC}" >&2; read -p "Email: " LETSENCRYPT_EMAIL; done;
+
+  # Pre-fill email if found
+  local email_prompt="Email for Let's Encrypt"
+  if [[ -n "$existing_email" ]]; then email_prompt+=" [${existing_email}]"; fi
+  read -p "${email_prompt}: " LETSENCRYPT_EMAIL;
+  if [[ -z "$LETSENCRYPT_EMAIL" && -n "$existing_email" ]]; then LETSENCRYPT_EMAIL="$existing_email"; fi
+
+  while ! [[ "$LETSENCRYPT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; do echo -e "${RED}ERROR: Invalid email.${NC}" >&2; read -p "Email: " LETSENCRYPT_EMAIL; done;
   read -p "Domain for Dashboard (e.g., traefik.yourdomain.com): " TRAEFIK_DOMAIN; while [[ -z "$TRAEFIK_DOMAIN" ]]; do echo -e "${RED}ERROR: Domain missing.${NC}" >&2; read -p "Dashboard Domain: " TRAEFIK_DOMAIN; done;
   read -p "Dashboard username: " BASIC_AUTH_USER; while [[ -z "$BASIC_AUTH_USER" ]]; do echo -e "${RED}ERROR: Username missing.${NC}" >&2; read -p "Login username: " BASIC_AUTH_USER; done;
   while true; do read -sp "Password for '${BASIC_AUTH_USER}': " BASIC_AUTH_PASSWORD; echo; if [[ -z "$BASIC_AUTH_PASSWORD" ]]; then echo -e "${RED}ERROR: Password empty.${NC}" >&2; continue; fi; read -sp "Confirm password: " BASIC_AUTH_PASSWORD_CONFIRM; echo; if [[ "$BASIC_AUTH_PASSWORD" == "$BASIC_AUTH_PASSWORD_CONFIRM" ]]; then echo -e "${GREEN}Password OK.${NC}"; break; else echo -e "${RED}ERROR: Passwords differ.${NC}" >&2; fi; done; echo ""
