@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #===============================================================================
-# Traefik Management Script for Debian 12
+# Traefik Management Script for Debian 12/13
 #
-# Version:      2.0.0 (English Translation, Automation Implemented)
+# Version:      2.1.0 (English Translation, Automation Implemented)
 # Author:       fbnlrz (Fixes/Translation by AI Assistant)
 # Based on:     Guide by phoenyx (Many thanks!)
-# Date:         2025-04-13 (Last Update: 2025-04-24)
+# Date:         2025-04-13 (Last Update: 2025-11-18)
 #
 # Description:  Comprehensive script for managing a Traefik v3 instance.
 #               Installation, configuration, services, logs, backup, autobackup,
@@ -15,22 +15,22 @@
 
 # --- Global Configuration Variables ---
 TRAEFIK_SERVICE_FILE="/etc/systemd/system/traefik.service"
-TRAEFIK_BINARY_PATH="/usr/local/bin/traefik"
-TRAEFIK_CONFIG_DIR="/opt/traefik" # Main directory for Backup/Restore
+TRAEFIK_BINARY_PATH="/usr/bin/traefik"
+TRAEFIK_CONFIG_DIR="/etc/traefik" # Main directory for Backup/Restore
 TRAEFIK_LOG_DIR="/var/log/traefik"
 TRAEFIK_SERVICE_NAME="traefik.service"
-TRAEFIK_DYNAMIC_CONF_DIR="${TRAEFIK_CONFIG_DIR}/dynamic_conf"
-TRAEFIK_CERTS_DIR="${TRAEFIK_CONFIG_DIR}/certs"
+TRAEFIK_DYNAMIC_CONF_DIR="${TRAEFIK_CONFIG_DIR}/conf.d"
+TRAEFIK_CERTS_DIR="${TRAEFIK_CONFIG_DIR}/ssl"
 TRAEFIK_AUTH_FILE="${TRAEFIK_CONFIG_DIR}/traefik_auth"
-ACME_TLS_FILE="${TRAEFIK_CERTS_DIR}/tls_letsencrypt.json"    # Main ACME file
-STATIC_CONFIG_FILE="${TRAEFIK_CONFIG_DIR}/config/traefik.yaml"
+ACME_TLS_FILE="${TRAEFIK_CERTS_DIR}/acme.json"    # Main ACME file
+STATIC_CONFIG_FILE="${TRAEFIK_CONFIG_DIR}/traefik.yaml"
 MIDDLEWARES_FILE="${TRAEFIK_DYNAMIC_CONF_DIR}/middlewares.yml"
 BACKUP_BASE_DIR="/var/backups"
 BACKUP_DIR="${BACKUP_BASE_DIR}/traefik"
 IP_LOG_FILE="${TRAEFIK_LOG_DIR}/ip_access.log" # Path for IP log
 SCRIPT_PATH="$(realpath "$0")" # Path to the current script
 
-DEFAULT_TRAEFIK_VERSION="v3.3.5" # Adjust default version here if desired
+DEFAULT_TRAEFIK_VERSION="v3.6.2" # Adjust default version here if desired
 GITHUB_REPO="traefik/traefik" # For Update Check
 
 # --- Systemd Unit Names ---
@@ -104,8 +104,37 @@ check_dependencies() {
 # Function for Menu Header
 print_header() {
     local title=$1
-    local version="2.0.0 (English, Automation)" # Version updated
+    local version="2.1.0 (English, Automation)" # Version updated
     clear; echo ""; echo -e "${BLUE}+-----------------------------------------+${NC}"; echo -e "${BLUE}|${NC} ${BOLD}${title}${NC} ${BLUE}|${NC}"; echo -e "${BLUE}|${NC} Version: ${version}  Author: fbnlrz    ${BLUE}|${NC}"; echo -e "${BLUE}|${NC} Based on guide by: phoenyx          ${BLUE}|${NC}"; echo -e "${BLUE}+-----------------------------------------+${NC}"; echo -e "| Current Time: $(date '+%Y-%m-%d %H:%M:%S %Z')    |"; printf "| Traefik Status: %-23s |\n" "${BOLD}$(is_traefik_active && echo "${GREEN}ACTIVE  ${NC}" || echo "${RED}INACTIVE${NC}")${NC}"; echo "+-----------------------------------------+";
+}
+
+# Generic Menu Function
+# Usage: show_menu "Title" "Option 1" "Option 2" ...
+# Returns: Sets variable MENU_CHOICE to the selected number (0 for Back/Exit)
+show_menu() {
+    local title="$1"
+    shift
+    local options=("$@")
+
+    print_header "$title"
+    local i=1
+    for opt in "${options[@]}"; do
+        printf "| ${CYAN}%-2s)${NC} %-36s |\n" "$i" "$opt"
+        ((i++))
+    done
+    echo "|-----------------------------------------|"
+    echo -e "| ${BOLD}0 )${NC} Back / Exit                       |"
+    echo "+-----------------------------------------+"
+
+    read -p "Your choice [0-$((i-1))]: " choice_input
+
+    if [[ "$choice_input" =~ ^[0-9]+$ ]] && [ "$choice_input" -ge 0 ] && [ "$choice_input" -lt "$i" ]; then
+        MENU_CHOICE=$choice_input
+    else
+        echo -e "${RED}Invalid choice.${NC}"
+        sleep 1
+        MENU_CHOICE=-1
+    fi
 }
 
 # --- Main Action Functions ---
@@ -131,7 +160,7 @@ install_traefik() {
   echo -e "${GREEN} Tools OK.${NC}";
 
   echo -e "${BLUE}>>> [2/7] Creating Directories...${NC}";
-  if ! sudo mkdir -p "${TRAEFIK_CONFIG_DIR}"/{config,dynamic_conf,certs}; then echo -e "${RED}ERROR: Could not create config directories.${NC}" >&2; return 1; fi
+  if ! sudo mkdir -p "${TRAEFIK_CONFIG_DIR}"/{conf.d,ssl}; then echo -e "${RED}ERROR: Could not create config directories.${NC}" >&2; return 1; fi
   if ! sudo mkdir -p "${TRAEFIK_LOG_DIR}"; then echo -e "${RED}ERROR: Could not create log directory.${NC}" >&2; return 1; fi
   if ! sudo touch "${ACME_TLS_FILE}"; then echo -e "${RED}ERROR: Could not create ACME file.${NC}" >&2; return 1; fi
   if ! sudo chmod 600 "${ACME_TLS_FILE}"; then echo -e "${YELLOW}WARNING: Could not set permissions for ACME file.${NC}" >&2; fi # Warning, not a critical error here
@@ -183,7 +212,7 @@ log:
   filePath: "${TRAEFIK_LOG_DIR}/traefik.log"
   format: json
 accessLog:
-  filePath: "${TRAEFIK_LOG_DIR}/access.log" # Corrected variable name
+  filePath: "${TRAEFIK_LOG_DIR}/traefik-access.log" # Corrected variable name
   format: json # Important for IP Logger
   bufferingSize: 100
 
@@ -214,7 +243,7 @@ entryPoints:
     address: "0.0.0.0:443" # Listens on IPv4 Port 443
     http:
       tls:
-        certResolver: tls_resolver
+        certResolver: letsencrypt
         options: default@file # References global 'default' options from middlewares.yml (or other dyn. config)
     transport:
       respondingTimeouts:
@@ -256,7 +285,7 @@ providers:
 
 # --- Certificate Resolvers ---
 certificatesResolvers:
-  tls_resolver: # Main resolver
+  letsencrypt: # Main resolver (Matches Proxmox script convention)
     acme:
       email: "${LETSENCRYPT_EMAIL}"
       storage: "${ACME_TLS_FILE}" # Main storage file
@@ -347,7 +376,7 @@ http:
       middlewares:
         - "traefik-auth@file" # References middleware from middlewares.yml
       tls:
-        certResolver: tls_resolver
+        certResolver: letsencrypt
 #-------------------------------------------------------------------------------
 EOF
   then echo -e "${RED}ERROR: Could not create traefik_dashboard.yml.${NC}" >&2; return 1; fi
@@ -370,7 +399,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+ExecStart=${TRAEFIK_BINARY_PATH} --configFile=${STATIC_CONFIG_FILE}
+Restart=on-failure
+ExecReload=/bin/kill -USR1 \$MAINPID
+
 # Runs as root to bind low ports (80, 443),
 # but with reduced privileges via capabilities.
 User=root
@@ -379,10 +412,6 @@ Group=root
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
-
-ExecStart=${TRAEFIK_BINARY_PATH} --configfile=${STATIC_CONFIG_FILE}
-Restart=on-failure
-RestartSec=5s
 
 # --- Security Hardening ---
 # Make root filesystem read-only
@@ -477,7 +506,7 @@ http:
         - "default-chain@file" # Uses the default security chain
       service: "service-${SERVICE_NAME}"
       tls:
-        certResolver: "tls_resolver" # Uses the default Let's Encrypt resolver
+        certResolver: "letsencrypt" # Uses the default Let's Encrypt resolver
 
   services:
     service-${SERVICE_NAME}:
@@ -816,7 +845,7 @@ setup_ip_logging() {
 # Helper script to extract client IPs from Traefik JSON Access Logs
 
 # Configuration
-ACCESS_LOG="${TRAEFIK_LOG_DIR}/access.log"
+ACCESS_LOG="${TRAEFIK_LOG_DIR}/traefik-access.log"
 IP_LOG="${IP_LOG_FILE}"
 JQ_COMMAND="/usr/bin/jq" # Use full path for robustness
 
@@ -1170,7 +1199,7 @@ view_logs() {
     local f="" # Variable for file paths
     case "$log_type" in # Quote log_type
        traefik) f="${TRAEFIK_LOG_DIR}/traefik.log"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}ERROR: Log (${f}) not found.${NC}" >&2; return 1; fi ;;
-       access) f="${TRAEFIK_LOG_DIR}/access.log"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}ERROR: Log (${f}) not found.${NC}" >&2; return 1; fi ;;
+       access) f="${TRAEFIK_LOG_DIR}/traefik-access.log"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}ERROR: Log (${f}) not found.${NC}" >&2; return 1; fi ;;
        ip_access) f="${IP_LOG_FILE}"; if [[ -f "$f" ]]; then sudo tail -n 100 -f "$f"; else echo -e "${RED}ERROR: Log (${f}) not found (IP Logging maybe not active?).${NC}" >&2; return 1; fi ;;
        journal) sudo journalctl -u "${TRAEFIK_SERVICE_NAME}" -n 100 -f || { echo -e "${RED}ERROR: journalctl failed.${NC}" >&2; return 1; } ;;
        autobackup) sudo journalctl -u "${AUTOBACKUP_SERVICE}" -n 100 -f || { echo -e "${RED}ERROR: journalctl failed.${NC}" >&2; return 1; } ;;
@@ -1434,7 +1463,7 @@ EOF
 enabled   = true
 port      = http,https # Check ports 80 and 443
 filter    = traefik-auth # Name of the filter file without .conf
-logpath   = ${TRAEFIK_LOG_DIR}/access.log # Check path to Access Log!
+logpath   = ${TRAEFIK_LOG_DIR}/traefik-access.log # Check path to Access Log!
 maxretry  = 5  # Number of attempts
 findtime  = 600 # Time window for attempts (seconds)
 bantime   = 3600 # Ban duration (seconds)
@@ -2325,6 +2354,177 @@ manage_firewall_rules() {
 # --- MAIN MENU LOGIC ---
 # (Must be after all function definitions)
 
+# --- Submenu Functions ---
+
+menu_installation() {
+    while true; do
+        show_menu "Installation & Setup" \
+            "Install / Overwrite Traefik" \
+            "Setup DNS Validation (for Wildcard Certs)"
+
+        case $MENU_CHOICE in
+            1) install_traefik ;;
+            2) setup_dns_validation ;;
+            0) return ;;
+        esac
+        echo ""; read -p "... Press Enter to continue ..." dummy
+    done
+}
+
+menu_configuration() {
+    while true; do
+        show_menu "Configuration & Services" \
+            "Add New Service / Route" \
+            "Modify Service / Route" \
+            "Remove Service / Route" \
+            "Edit Static Config (${STATIC_CONFIG_FILE})" \
+            "Edit Middleware Config (${MIDDLEWARES_FILE})" \
+            "Edit EntryPoints (${STATIC_CONFIG_FILE})" \
+            "Edit Global TLS Options (${MIDDLEWARES_FILE})"
+
+        case $MENU_CHOICE in
+            1) add_service ;;
+            2) modify_service ;;
+            3) remove_service ;;
+            4) edit_static_config ;;
+            5) edit_middlewares_config ;;
+            6) edit_entrypoints ;;
+            7) edit_tls_options ;;
+            0) return ;;
+        esac
+        echo ""; read -p "... Press Enter to continue ..." dummy
+    done
+}
+
+menu_security() {
+    while true; do
+        show_menu "Security & Certificates" \
+            "Manage Dashboard Users" \
+            "Show Certificate Details (ACME)" \
+            "Check Certificate Expiry (< 14 Days)" \
+            "Check for Insecure API" \
+            "Show Example Fail2Ban Config" \
+            "Add Plugin (Experimental)"
+
+        case $MENU_CHOICE in
+            1) manage_dashboard_users ;;
+            2) show_certificate_info ;;
+            3) check_certificate_expiry ;;
+            4) check_insecure_api ;;
+            5) generate_fail2ban_config ;;
+            6) install_plugin ;;
+            0) return ;;
+        esac
+        echo ""; read -p "... Press Enter to continue ..." dummy
+    done
+}
+
+menu_service_logs() {
+    while true; do
+        show_menu "Service, Logs & Metrics" \
+            "START Traefik Service" \
+            "STOP Traefik Service" \
+            "RESTART Traefik Service" \
+            "Show Traefik Service STATUS" \
+            "View Traefik Log (traefik.log)" \
+            "View Access Log (traefik-access.log)" \
+            "View Systemd Journal Log (traefik)" \
+            "Display Live Metrics for a Service"
+
+        case $MENU_CHOICE in
+            1) manage_service "start" ;;
+            2) manage_service "stop" ;;
+            3) manage_service "restart" ;;
+            4) manage_service "status" ;;
+            5) view_logs "traefik" ;;
+            6) view_logs "access" ;;
+            7) view_logs "journal" ;;
+            8) display_live_metrics ;;
+            0) return ;;
+        esac
+        echo ""; read -p "... Press Enter to continue ..." dummy
+    done
+}
+
+menu_backup() {
+    while true; do
+        show_menu "Backup & Restore" \
+            "Create Full Backup" \
+            "Restore Full Backup ${YELLOW}(CAUTION!)${NC}" \
+            "Restore Single Service from Backup"
+
+        case $MENU_CHOICE in
+            1) backup_traefik false ;;
+            2) restore_traefik ;;
+            3) restore_single_service ;;
+            0) return ;;
+        esac
+        echo ""; read -p "... Press Enter to continue ..." dummy
+    done
+}
+
+menu_diagnostics() {
+    while true; do
+        show_menu "Diagnostics & Health" \
+            "Run Comprehensive Diagnostics" \
+            "Show Installed Traefik Version" \
+            "Check Listening Ports (ss)" \
+            "Test Backend Connectivity" \
+            "Show Active Config (API/jq)"
+
+        case $MENU_CHOICE in
+            1) run_diagnostics ;;
+            2) show_traefik_version ;;
+            3) check_listening_ports ;;
+            4) test_backend_connectivity ;;
+            5) show_active_config ;;
+            0) return ;;
+        esac
+        echo ""; read -p "... Press Enter to continue ..." dummy
+    done
+}
+
+menu_automation() {
+    while true; do
+        show_menu "Automation & Maintenance" \
+            "Setup/Modify Automatic Backup" \
+            "Remove Automatic Backup" \
+            "Setup Dedicated IP Logging" \
+            "Remove Dedicated IP Logging" \
+            "Check for New Traefik Version" \
+            "Update Traefik Binary ${YELLOW}(RISK!)${NC}" \
+            "Update All Dependencies"
+
+        case $MENU_CHOICE in
+            1) setup_autobackup ;;
+            2) remove_autobackup ;;
+            3) setup_ip_logging ;;
+            4) remove_ip_logging ;;
+            5) check_traefik_updates ;;
+            6) update_traefik_binary ;;
+            7) update_all_dependencies ;;
+            0) return ;;
+        esac
+        echo ""; read -p "... Press Enter to continue ..." dummy
+    done
+}
+
+menu_firewall() {
+    while true; do
+        show_menu "Firewall & System" \
+            "Manage Firewall Rules (UFW)"
+
+        case $MENU_CHOICE in
+            1) manage_firewall_rules ;;
+            0) return ;;
+        esac
+        echo ""; read -p "... Press Enter to continue ..." dummy
+    done
+}
+
+# --- MAIN MENU LOGIC ---
+# (Must be after all function definitions)
+
 # Execute non-interactive backup if requested (now that function is defined)
 # Ensure backup_traefik is defined before calling it
 if $non_interactive_mode && [[ "$1" == "--run-backup" ]]; then
@@ -2349,117 +2549,29 @@ if ! $non_interactive_mode; then
     check_dependencies # Check tools directly at the beginning
 
     while true; do
-        print_header "Main Menu - Traefik Management"
+        show_menu "Main Menu - Traefik Management" \
+            "Installation & Setup" \
+            "Configuration & Services" \
+            "Security & Certificates" \
+            "Service, Logs & Metrics" \
+            "Backup & Restore" \
+            "Diagnostics & Health" \
+            "Automation & Maintenance" \
+            "Firewall & System" \
+            "${RED}Uninstall Traefik${NC}"
 
-        # Menu items - Reorganized for new functions
-        echo -e "| ${CYAN}1) Installation & Setup            ${NC} |"
-        echo -e "| ${CYAN}2) Configuration & Services        ${NC} |"
-        echo -e "| ${CYAN}3) Security & Certificates         ${NC} |"
-        echo -e "| ${CYAN}4) Service, Logs & Metrics         ${NC} |"
-        echo -e "| ${CYAN}5) Backup & Restore                ${NC} |"
-        echo -e "| ${CYAN}6) Diagnostics & Health            ${NC} |"
-        echo -e "| ${CYAN}7) Automation & Maintenance        ${NC} |"
-        echo -e "| ${CYAN}8) Firewall & System               ${NC} |"
-        echo "|-----------------------------------------|"
-        echo -e "| ${BOLD}9) Uninstall Traefik ${RED}(RISK!)      ${NC} |"
-        echo "|-----------------------------------------|"
-        echo -e "| ${BOLD}0) Exit Script                     ${NC} |"
-        echo "+-----------------------------------------+";
-        read -p "Your choice [0-9]: " main_choice
-
-        local sub_choice=-1 # Reset sub_choice
-
-        case "$main_choice" in
-            1) # --- Installation & Setup ---
-                clear; print_header "Installation & Setup";
-                echo " 1) Install / Overwrite Traefik";
-                echo " 2) Setup DNS Validation (for Wildcard Certs)";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-2]: " sub_choice
-                case "$sub_choice" in 1) install_traefik ;; 2) setup_dns_validation ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            2) # --- Configuration & Services ---
-                clear; print_header "Configuration & Services";
-                echo " 1) Add New Service / Route";
-                echo " 2) Modify Service / Route";
-                echo " 3) Remove Service / Route";
-                echo " 4) Edit Static Config (${STATIC_CONFIG_FILE})";
-                echo " 5) Edit Middleware Config (${MIDDLEWARES_FILE})";
-                echo " 6) Edit EntryPoints (${STATIC_CONFIG_FILE})";
-                echo " 7) Edit Global TLS Options (${MIDDLEWARES_FILE})";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-7]: " sub_choice
-                case "$sub_choice" in 1) add_service ;; 2) modify_service ;; 3) remove_service ;; 4) edit_static_config ;; 5) edit_middlewares_config ;; 6) edit_entrypoints ;; 7) edit_tls_options ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            3) # --- Security & Certificates ---
-                clear; print_header "Security & Certificates";
-                echo " 1) Manage Dashboard Users";
-                echo " 2) Show Certificate Details (ACME)";
-                echo " 3) Check Certificate Expiry (< 14 Days)";
-                echo " 4) Check for Insecure API";
-                echo " 5) Show Example Fail2Ban Config";
-                echo " 6) Add Plugin (Experimental)";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-6]: " sub_choice
-                case "$sub_choice" in 1) manage_dashboard_users ;; 2) show_certificate_info ;; 3) check_certificate_expiry ;; 4) check_insecure_api ;; 5) generate_fail2ban_config ;; 6) install_plugin ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            4) # --- Service, Logs & Metrics ---
-                clear; print_header "Service, Logs & Metrics";
-                echo " 1) START Traefik Service";
-                echo " 2) STOP Traefik Service";
-                echo " 3) RESTART Traefik Service";
-                echo " 4) Show Traefik Service STATUS";
-                echo " 5) View Traefik Log (traefik.log)";
-                echo " 6) View Access Log (access.log)";
-                echo " 7) View Systemd Journal Log (traefik)";
-                echo " 8) Display Live Metrics for a Service";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-8]: " sub_choice
-                case "$sub_choice" in 1) manage_service "start" ;; 2) manage_service "stop" ;; 3) manage_service "restart" ;; 4) manage_service "status" ;; 5) view_logs "traefik" ;; 6) view_logs "access" ;; 7) view_logs "journal" ;; 8) display_live_metrics ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            5) # --- Backup & Restore ---
-                 clear; print_header "Backup & Restore";
-                 echo " 1) Create Full Backup";
-                 echo " 2) Restore Full Backup ${YELLOW}(CAUTION!)${NC}";
-                 echo " 3) Restore Single Service from Backup";
-                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-3]: " sub_choice
-                 case "$sub_choice" in 1) backup_traefik false ;; 2) restore_traefik ;; 3) restore_single_service ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            6) # --- Diagnostics & Health ---
-                clear; print_header "Diagnostics & Health";
-                echo " 1) Run Comprehensive Diagnostics";
-                echo " 2) Show Installed Traefik Version";
-                echo " 3) Check Listening Ports (ss)";
-                echo " 4) Test Backend Connectivity";
-                echo " 5) Show Active Config (API/jq)";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-5]: " sub_choice
-                case "$sub_choice" in 1) run_diagnostics ;; 2) show_traefik_version ;; 3) check_listening_ports ;; 4) test_backend_connectivity ;; 5) show_active_config ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            7) # --- Automation & Maintenance ---
-                clear; print_header "Automation & Maintenance";
-                echo " 1) Setup/Modify Automatic Backup";
-                echo " 2) Remove Automatic Backup";
-                echo " 3) Setup Dedicated IP Logging";
-                echo " 4) Remove Dedicated IP Logging";
-                echo " 5) Check for New Traefik Version";
-                echo " 6) Update Traefik Binary ${YELLOW}(RISK!)${NC}";
-                echo " 7) Update All Dependencies";
-                echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-7]: " sub_choice
-                case "$sub_choice" in 1) setup_autobackup ;; 2) remove_autobackup ;; 3) setup_ip_logging ;; 4) remove_ip_logging ;; 5) check_traefik_updates ;; 6) update_traefik_binary ;; 7) update_all_dependencies ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            8) # --- Firewall & System ---
-                 clear; print_header "Firewall & System";
-                 echo " 1) Manage Firewall Rules (UFW)";
-                 echo " 0) Back"; echo "-----------------------------------"; read -p "Choice [0-1]: " sub_choice
-                 case "$sub_choice" in 1) manage_firewall_rules ;; 0) ;; *) echo -e "${RED}Invalid choice.${NC}" >&2 ;; esac ;;
-            9) # --- Uninstall ---
-                 uninstall_traefik ;;
-            0) # --- Exit Script ---
-                echo "Exiting script. Goodbye!"; exit 0 ;;
-            *) # --- Invalid Main Menu Choice ---
-                echo ""; echo -e "${RED}ERROR: Invalid choice '$main_choice'.${NC}" >&2 ;;
+        case $MENU_CHOICE in
+            1) menu_installation ;;
+            2) menu_configuration ;;
+            3) menu_security ;;
+            4) menu_service_logs ;;
+            5) menu_backup ;;
+            6) menu_diagnostics ;;
+            7) menu_automation ;;
+            8) menu_firewall ;;
+            9) uninstall_traefik; echo ""; read -p "Press Enter to continue..." dummy ;;
+            0) echo "Exiting script. Goodbye!"; exit 0 ;;
         esac
-
-        # Pause before showing main menu again unless exiting or returning from submenu (choice 0)
-        if [[ "$main_choice" != "0" ]]; then
-            # Only pause if an action was selected in the submenu (choice > 0) or main choice was invalid
-            # Also check if the main choice itself was valid for the top level menu (1-9)
-            if [[ "$sub_choice" -gt 0 ]] || ! [[ "$main_choice" =~ ^[1-9]$ ]]; then # Range adjusted
-                 # Don't pause if the submenu choice was 0 (Back)
-                 if [[ "$sub_choice" -ne 0 ]]; then
-                     echo ""; read -p "... Press Enter for main menu ..." dummy_var;
-                 fi
-            fi
-        fi
     done
 fi # End of interactive mode
 
