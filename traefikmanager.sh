@@ -115,7 +115,7 @@ show_menu() {
     local title="$1"
     shift
     local options=("$@")
-
+    
     print_header "$title"
     local i=1
     for opt in "${options[@]}"; do
@@ -125,9 +125,9 @@ show_menu() {
     echo "|-----------------------------------------|"
     echo -e "| ${BOLD}0 )${NC} Back / Exit                       |"
     echo "+-----------------------------------------+"
-
+    
     read -p "Your choice [0-$((i-1))]: " choice_input
-
+    
     if [[ "$choice_input" =~ ^[0-9]+$ ]] && [ "$choice_input" -ge 0 ] && [ "$choice_input" -lt "$i" ]; then
         MENU_CHOICE=$choice_input
     else
@@ -140,51 +140,85 @@ show_menu() {
 # --- Main Action Functions ---
 
 #===============================================================================
+# Function: Upgrade Minimal Configuration
+#===============================================================================
+upgrade_minimal_config() {
+    print_header "Upgrade Minimal Configuration"
+    echo -e "${BLUE}INFO: Upgrading minimal/insecure configuration to optimized standard.${NC}"
+    echo "--------------------------------------------------"
+
+    # Extract existing settings if possible
+    local existing_email=""
+    if [[ -f "${STATIC_CONFIG_FILE}" ]]; then
+        # Try to extract email from existing config
+        existing_email=$(grep -oP 'email: "?\K[^"]+' "${STATIC_CONFIG_FILE}" 2>/dev/null)
+        if [[ "$existing_email" == "foo@bar.com" ]]; then existing_email=""; fi # Ignore placeholder
+    fi
+
+    read -p "Traefik version [${DEFAULT_TRAEFIK_VERSION}]: " TRAEFIK_VERSION; TRAEFIK_VERSION=${TRAEFIK_VERSION:-$DEFAULT_TRAEFIK_VERSION}; TRAEFIK_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//');
+
+    # Pre-fill email if found
+    local email_prompt="Email for Let's Encrypt"
+    if [[ -n "$existing_email" ]]; then email_prompt+=" [${existing_email}]"; fi
+    read -p "${email_prompt}: " LETSENCRYPT_EMAIL; 
+    if [[ -z "$LETSENCRYPT_EMAIL" && -n "$existing_email" ]]; then LETSENCRYPT_EMAIL="$existing_email"; fi
+    
+    while ! [[ "$LETSENCRYPT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; do echo -e "${RED}ERROR: Invalid email.${NC}" >&2; read -p "Email: " LETSENCRYPT_EMAIL; done;
+    
+    read -p "Domain for Dashboard (e.g., traefik.yourdomain.com): " TRAEFIK_DOMAIN; while [[ -z "$TRAEFIK_DOMAIN" ]]; do echo -e "${RED}ERROR: Domain missing.${NC}" >&2; read -p "Dashboard Domain: " TRAEFIK_DOMAIN; done;
+    read -p "Dashboard username: " BASIC_AUTH_USER; while [[ -z "$BASIC_AUTH_USER" ]]; do echo -e "${RED}ERROR: Username missing.${NC}" >&2; read -p "Login username: " BASIC_AUTH_USER; done;
+    while true; do read -sp "Password for '${BASIC_AUTH_USER}': " BASIC_AUTH_PASSWORD; echo; if [[ -z "$BASIC_AUTH_PASSWORD" ]]; then echo -e "${RED}ERROR: Password empty.${NC}" >&2; continue; fi; read -sp "Confirm password: " BASIC_AUTH_PASSWORD_CONFIRM; echo; if [[ "$BASIC_AUTH_PASSWORD" == "$BASIC_AUTH_PASSWORD_CONFIRM" ]]; then echo -e "${GREEN}Password OK.${NC}"; break; else echo -e "${RED}ERROR: Passwords differ.${NC}" >&2; fi; done; echo ""
+
+    # Proceed with installation (which writes the config) using the gathered variables
+    # We define a flag to skip the interactive prompts inside install_traefik (refactoring needed)
+    # Instead of refactoring install_traefik to accept args (complex), we will set global vars
+    # and call a slightly modified logic or just execute the config writing part.
+    # Simplest approach: define the variables globally and jump to the config writing part in install_traefik.
+    # However, install_traefik does downloading etc.
+    # Let's refactor install_traefik to check if vars are already set.
+    
+    # Set global flag to skip prompts in install_traefik
+    export SKIP_INSTALL_PROMPTS=true
+    export TRAEFIK_VERSION LETSENCRYPT_EMAIL TRAEFIK_DOMAIN BASIC_AUTH_USER BASIC_AUTH_PASSWORD
+    
+    install_traefik
+    
+    unset SKIP_INSTALL_PROMPTS
+    return 0
+}
+
+#===============================================================================
 # Function: Install or Overwrite Traefik
 #===============================================================================
 install_traefik() {
   # Removed set -e to handle errors more explicitly
-  print_header "Traefik Installation / Update"
-  echo -e "${BLUE}INFO: Installs/updates Traefik.${NC}"; echo "--------------------------------------------------"
-
-  # Check for existing minimal/Proxmox configuration
-  local existing_email=""
-  if [[ -f "${STATIC_CONFIG_FILE}" ]]; then
-      # Try to extract email from existing config
-      existing_email=$(grep -oP 'email: "\K[^"]+' "${STATIC_CONFIG_FILE}" 2>/dev/null)
-      if [[ "$existing_email" == "foo@bar.com" ]]; then existing_email=""; fi # Ignore placeholder
-  fi
-
-  if is_traefik_installed; then
-      local c=false;
-      # Detect if it looks like a minimal install (e.g. insecure=true or no trustedIPs)
-      local is_minimal=false
-      if grep -q "insecure: true" "${STATIC_CONFIG_FILE}" 2>/dev/null; then is_minimal=true; fi
-
-      if $is_minimal; then
+  if [[ "${SKIP_INSTALL_PROMPTS}" != "true" ]]; then
+      print_header "Traefik Installation / Update"
+      echo -e "${BLUE}INFO: Installs/updates Traefik.${NC}"; echo "--------------------------------------------------"
+      
+      # Check for existing minimal/Proxmox configuration
+      if is_traefik_installed && [[ -f "${STATIC_CONFIG_FILE}" ]] && grep -q "insecure: true" "${STATIC_CONFIG_FILE}" 2>/dev/null; then
+          local c=false
           echo -e "${YELLOW}WARNING: Existing Traefik configuration seems minimal (e.g., insecure API).${NC}"
           echo -e "${YELLOW}         It is recommended to upgrade to the optimized configuration.${NC}"
-          ask_confirmation "Upgrade configuration now? (Overwrites ${STATIC_CONFIG_FILE})" c
-      else
-          ask_confirmation "${YELLOW}WARNING: Traefik exists. Overwrite?${NC}" c
+          ask_confirmation "Upgrade configuration now?" c
+          if $c; then
+              upgrade_minimal_config
+              return $?
+          fi
       fi
 
-      if ! $c; then echo "Aborting."; return 1; fi;
-      echo -e "${YELLOW}INFO: Overwriting...${NC}";
+      if is_traefik_installed; then local c=false; ask_confirmation "${YELLOW}WARNING: Traefik exists. Overwrite?${NC}" c; if ! $c; then echo "Aborting."; return 1; fi; echo -e "${YELLOW}INFO: Overwriting...${NC}"; fi
+      
+      read -p "Traefik version [${DEFAULT_TRAEFIK_VERSION}]: " TRAEFIK_VERSION; TRAEFIK_VERSION=${TRAEFIK_VERSION:-$DEFAULT_TRAEFIK_VERSION}; TRAEFIK_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//');
+      read -p "Email for Let's Encrypt: " LETSENCRYPT_EMAIL; while ! [[ "$LETSENCRYPT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; do echo -e "${RED}ERROR: Invalid email.${NC}" >&2; read -p "Email: " LETSENCRYPT_EMAIL; done;
+      read -p "Domain for Dashboard (e.g., traefik.yourdomain.com): " TRAEFIK_DOMAIN; while [[ -z "$TRAEFIK_DOMAIN" ]]; do echo -e "${RED}ERROR: Domain missing.${NC}" >&2; read -p "Dashboard Domain: " TRAEFIK_DOMAIN; done;
+      read -p "Dashboard username: " BASIC_AUTH_USER; while [[ -z "$BASIC_AUTH_USER" ]]; do echo -e "${RED}ERROR: Username missing.${NC}" >&2; read -p "Login username: " BASIC_AUTH_USER; done;
+      while true; do read -sp "Password for '${BASIC_AUTH_USER}': " BASIC_AUTH_PASSWORD; echo; if [[ -z "$BASIC_AUTH_PASSWORD" ]]; then echo -e "${RED}ERROR: Password empty.${NC}" >&2; continue; fi; read -sp "Confirm password: " BASIC_AUTH_PASSWORD_CONFIRM; echo; if [[ "$BASIC_AUTH_PASSWORD" == "$BASIC_AUTH_PASSWORD_CONFIRM" ]]; then echo -e "${GREEN}Password OK.${NC}"; break; else echo -e "${RED}ERROR: Passwords differ.${NC}" >&2; fi; done; echo ""
+  else
+      # Variables are already set by upgrade_minimal_config
+      local INSTALLED_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//'); # Ensure this is set
   fi
-
-  read -p "Traefik version [${DEFAULT_TRAEFIK_VERSION}]: " TRAEFIK_VERSION; TRAEFIK_VERSION=${TRAEFIK_VERSION:-$DEFAULT_TRAEFIK_VERSION}; TRAEFIK_VERSION_NUM=$(echo "$TRAEFIK_VERSION"|sed 's/^v//');
-
-  # Pre-fill email if found
-  local email_prompt="Email for Let's Encrypt"
-  if [[ -n "$existing_email" ]]; then email_prompt+=" [${existing_email}]"; fi
-  read -p "${email_prompt}: " LETSENCRYPT_EMAIL;
-  if [[ -z "$LETSENCRYPT_EMAIL" && -n "$existing_email" ]]; then LETSENCRYPT_EMAIL="$existing_email"; fi
-
-  while ! [[ "$LETSENCRYPT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; do echo -e "${RED}ERROR: Invalid email.${NC}" >&2; read -p "Email: " LETSENCRYPT_EMAIL; done;
-  read -p "Domain for Dashboard (e.g., traefik.yourdomain.com): " TRAEFIK_DOMAIN; while [[ -z "$TRAEFIK_DOMAIN" ]]; do echo -e "${RED}ERROR: Domain missing.${NC}" >&2; read -p "Dashboard Domain: " TRAEFIK_DOMAIN; done;
-  read -p "Dashboard username: " BASIC_AUTH_USER; while [[ -z "$BASIC_AUTH_USER" ]]; do echo -e "${RED}ERROR: Username missing.${NC}" >&2; read -p "Login username: " BASIC_AUTH_USER; done;
-  while true; do read -sp "Password for '${BASIC_AUTH_USER}': " BASIC_AUTH_PASSWORD; echo; if [[ -z "$BASIC_AUTH_PASSWORD" ]]; then echo -e "${RED}ERROR: Password empty.${NC}" >&2; continue; fi; read -sp "Confirm password: " BASIC_AUTH_PASSWORD_CONFIRM; echo; if [[ "$BASIC_AUTH_PASSWORD" == "$BASIC_AUTH_PASSWORD_CONFIRM" ]]; then echo -e "${GREEN}Password OK.${NC}"; break; else echo -e "${RED}ERROR: Passwords differ.${NC}" >&2; fi; done; echo ""
 
   echo -e "${BLUE}>>> [1/7] Updating System & Tools...${NC}";
   if ! sudo apt update; then echo -e "${RED}ERROR: apt update failed.${NC}" >&2; return 1; fi
@@ -432,10 +466,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
 ExecStart=${TRAEFIK_BINARY_PATH} --configFile=${STATIC_CONFIG_FILE}
 Restart=on-failure
-ExecReload=/bin/kill -USR1 \$MAINPID
+# ExecReload=/bin/kill -USR1 \$MAINPID # Disabled for Type=simple reliability
 
 # Runs as root to bind low ports (80, 443),
 # but with reduced privileges via capabilities.
@@ -2394,7 +2428,7 @@ menu_installation() {
         show_menu "Installation & Setup" \
             "Install / Overwrite Traefik" \
             "Setup DNS Validation (for Wildcard Certs)"
-
+        
         case $MENU_CHOICE in
             1) install_traefik ;;
             2) setup_dns_validation ;;
@@ -2413,8 +2447,9 @@ menu_configuration() {
             "Edit Static Config (${STATIC_CONFIG_FILE})" \
             "Edit Middleware Config (${MIDDLEWARES_FILE})" \
             "Edit EntryPoints (${STATIC_CONFIG_FILE})" \
-            "Edit Global TLS Options (${MIDDLEWARES_FILE})"
-
+            "Edit Global TLS Options (${MIDDLEWARES_FILE})" \
+            "Upgrade/Fix Minimal Configuration"
+        
         case $MENU_CHOICE in
             1) add_service ;;
             2) modify_service ;;
@@ -2423,6 +2458,7 @@ menu_configuration() {
             5) edit_middlewares_config ;;
             6) edit_entrypoints ;;
             7) edit_tls_options ;;
+            8) upgrade_minimal_config ;;
             0) return ;;
         esac
         echo ""; read -p "... Press Enter to continue ..." dummy
@@ -2438,7 +2474,7 @@ menu_security() {
             "Check for Insecure API" \
             "Show Example Fail2Ban Config" \
             "Add Plugin (Experimental)"
-
+        
         case $MENU_CHOICE in
             1) manage_dashboard_users ;;
             2) show_certificate_info ;;
@@ -2463,7 +2499,7 @@ menu_service_logs() {
             "View Access Log (traefik-access.log)" \
             "View Systemd Journal Log (traefik)" \
             "Display Live Metrics for a Service"
-
+        
         case $MENU_CHOICE in
             1) manage_service "start" ;;
             2) manage_service "stop" ;;
@@ -2485,7 +2521,7 @@ menu_backup() {
             "Create Full Backup" \
             "Restore Full Backup ${YELLOW}(CAUTION!)${NC}" \
             "Restore Single Service from Backup"
-
+        
         case $MENU_CHOICE in
             1) backup_traefik false ;;
             2) restore_traefik ;;
@@ -2504,7 +2540,7 @@ menu_diagnostics() {
             "Check Listening Ports (ss)" \
             "Test Backend Connectivity" \
             "Show Active Config (API/jq)"
-
+        
         case $MENU_CHOICE in
             1) run_diagnostics ;;
             2) show_traefik_version ;;
@@ -2527,7 +2563,7 @@ menu_automation() {
             "Check for New Traefik Version" \
             "Update Traefik Binary ${YELLOW}(RISK!)${NC}" \
             "Update All Dependencies"
-
+        
         case $MENU_CHOICE in
             1) setup_autobackup ;;
             2) remove_autobackup ;;
@@ -2546,7 +2582,7 @@ menu_firewall() {
     while true; do
         show_menu "Firewall & System" \
             "Manage Firewall Rules (UFW)"
-
+        
         case $MENU_CHOICE in
             1) manage_firewall_rules ;;
             0) return ;;
@@ -2580,6 +2616,14 @@ fi
 if ! $non_interactive_mode; then
     check_root
     check_dependencies # Check tools directly at the beginning
+    
+    # Check for minimal config on startup and warn
+    if is_traefik_installed && [[ -f "${STATIC_CONFIG_FILE}" ]] && grep -q "insecure: true" "${STATIC_CONFIG_FILE}" 2>/dev/null; then
+        echo -e "${YELLOW}WARNING: Minimal/Insecure Traefik configuration detected!${NC}"
+        echo -e "${YELLOW}         Please go to 'Configuration & Services' -> 'Upgrade/Fix Minimal Configuration' to secure your instance.${NC}"
+        echo -e "         (Press Enter to continue to menu...)"
+        read dummy
+    fi
 
     while true; do
         show_menu "Main Menu - Traefik Management" \
