@@ -1,6 +1,6 @@
-# Traefik Management Script v2.0.0
+# Traefik Management Script v2.1.0
 # WARNING: This is completely generated with AI ( Gemini and DeepSeek) 
-A comprehensive Bash script for managing a Traefik v3 reverse proxy instance on Debian 12 systems.
+A comprehensive Bash script for managing a Traefik v3 reverse proxy instance on Debian 12/13 systems.
 
 This script provides a menu-driven interface to handle installation, configuration, service management, logging, backups, automated tasks, diagnostics, and updates for Traefik.
 
@@ -69,7 +69,7 @@ The script offers a wide range of functionalities organized into menus:
 
 ## Prerequisites
 
-*   **Operating System:** Debian 12 (tested), likely compatible with other recent systemd-based Linux distributions (Ubuntu, etc.).
+*   **Operating System:** Debian 12/13 (tested), likely compatible with other recent systemd-based Linux distributions (Ubuntu, etc.).
 *   **Shell:** Bash.
 *   **Privileges:** `sudo` access is required to run the script and manage system files/services.
 *   **Core Utilities:** Standard Linux commands like `sed`, `awk`, `grep`, `curl`, `tar`, `find`, `ss`, `date`, `openssl`, `mkdir`, `chmod`, `chown`, `mv`, `rm`, `systemctl`, `realpath`.
